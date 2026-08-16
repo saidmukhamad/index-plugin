@@ -20,14 +20,14 @@ Changes to `manifest.json` still require restarting Obsidian. Rerun `npm run set
 
 The plugin makes folders feel like notes while keeping ownership explicit:
 
-- Creating a folder creates a hidden, plugin-owned index inside it.
+- Creating a folder creates a hidden, plugin-owned note named after the folder: `Projects/Projects.md`. Nested folders follow the same rule, such as `Projects/Alpha/Alpha.md`, so tabs, links, and Graph View use meaningful names instead of `index`.
 - Every owned index shows an editable folder name in Obsidian's normal inline-title position. Renaming either that title or the folder renames the other; Markdown headings remain untouched user content.
 - Ownership frontmatter, its Properties panel, and its property-count status are hidden inside Obsidian; user-authored properties remain visible.
-- Clicking a folder title opens its index; clicking the chevron still expands or collapses it. If an existing folder already has an unowned `index.md`, clicking opens it without hiding or modifying it.
+- Clicking a folder title opens its folder note; clicking the chevron still expands or collapses it. If an existing folder already has an unowned same-name note or legacy `index.md`, clicking opens it without hiding or modifying it.
 - Direct child notes and indexed subfolders are maintained in a marked list inside the index.
-- Only files with `index-plugin: folder-index` frontmatter are hidden. An unrelated `index.md` is never hidden automatically.
-- `Create new (indexed)` creates a child note. When run from a regular Markdown note, it first converts `Note.md` to `Note/index.md`, preserving the note content.
-- `Convert (indexed)` in a folder's context menu adopts an existing `index.md` or creates one. Adoption preserves all existing content and adds only the plugin-owned list block. If an untouched generated fallback already exists, it is moved to Obsidian's recoverable vault trash; a customized fallback is kept as a regular visible note.
+- Only files with `index-plugin: folder-index` frontmatter are hidden. Unrelated same-name notes and `index.md` files are never hidden automatically.
+- `Create new (indexed)` creates a child note. When run from a regular Markdown note, it first converts `Note.md` to `Note/Note.md`, preserving the note content.
+- `Convert (indexed)` in a folder's context menu adopts a same-name note first, falls back to a legacy `index.md`, or creates the folder note. Adoption preserves all existing content and adds only the plugin-owned list block. Existing plugin-owned `index.md` files migrate to the folder-named convention automatically. If an untouched generated fallback already exists, it is moved to Obsidian's recoverable vault trash; a customized fallback is kept as a regular visible note.
 - `Initialize indexes for all folders` explicitly converts every existing non-root folder.
 
 The generated child list is rendered as a styled **Pages** panel and bounded by `index-plugin:children:start` and `index-plugin:children:end` HTML comments. The plugin hides those exact marker lines in Obsidian's editor while retaining them in the Markdown file as safe update boundaries. Content outside the markers belongs to the user and is not rewritten. Incomplete or duplicate markers stop the update instead of risking the note.

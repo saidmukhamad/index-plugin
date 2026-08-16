@@ -7,7 +7,7 @@ index-plugin-folder-name: Start here
 
 This vault is isolated from your real notes. Use it for fixtures and manual plugin testing.
 
-Run **Index Plugin: Create new (indexed)** to add a linked child note. Folder indexes such as this one stay hidden in the file explorer.
+Run **Index Plugin: Create new (indexed)** to add a linked child note. Folder notes such as this one stay hidden in the file explorer.
 
 <!-- index-plugin:children:start -->
 > [!index-pages] Pages

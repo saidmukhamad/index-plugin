@@ -15,10 +15,10 @@ import {
 	removeManagedBlock,
 	replaceManagedBlock,
 } from './index-document';
+import { getFolderIndexFilename, getFolderIndexPath } from './index-path';
 import { normalizeFolderName, normalizeNoteName } from './note-name';
 
 const SYNC_DELAY_MS = 120;
-const MAX_INDEX_FILENAME_ATTEMPTS = 100;
 
 function joinPath(parent: string, child: string): string {
 	return normalizePath(parent ? `${parent}/${child}` : child);
@@ -41,6 +41,8 @@ export class IndexManager {
 	private readonly pendingIndexCreates = new Set<string>();
 	private readonly suppressedFolderCreates = new Set<string>();
 	private readonly ensuringIndexes = new Map<string, Promise<TFile>>();
+	private readonly aligningIndexes = new Map<string, Promise<TFile | null>>();
+	private readonly refreshingOwnership = new Map<string, Promise<void>>();
 	private readonly pendingFolderSyncs = new Set<string>();
 	private readonly ownedIndexListeners = new Set<() => void>();
 	private syncTimer: number | null = null;
@@ -78,6 +80,23 @@ export class IndexManager {
 
 					if (owned) {
 						this.ownedIndexPaths.add(file.path);
+						const folder = file.parent;
+						if (
+							folder &&
+							!folder.isRoot() &&
+							(file.path !== this.getExpectedIndexPath(folder) ||
+								cache.frontmatter?.[INDEX_FOLDER_NAME_KEY] !== folder.name ||
+								this.hasManagedFolderAlias(cache.frontmatter, folder.name))
+						) {
+							void this.refreshOwnershipMetadata(folder).catch(
+								(error: unknown) => {
+									console.error(
+										`Could not keep folder note ${file.path} synchronized.`,
+										error,
+									);
+								},
+							);
+						}
 					}
 					if (changed) {
 						this.emitOwnedIndexesChanged();
@@ -97,6 +116,8 @@ export class IndexManager {
 			this.syncTimer = null;
 		}
 		this.pendingFolderSyncs.clear();
+		this.aligningIndexes.clear();
+		this.refreshingOwnership.clear();
 		this.ownedIndexListeners.clear();
 	}
 
@@ -105,7 +126,7 @@ export class IndexManager {
 		return () => this.ownedIndexListeners.delete(listener);
 	}
 
-	isOwnedIndex(file: TAbstractFile | null): file is TFile {
+	isOwnedIndex(file: TAbstractFile | null): boolean {
 		return (
 			file instanceof TFile &&
 			(this.ownedIndexPaths.has(file.path) || this.cacheSaysOwned(file))
@@ -189,6 +210,19 @@ export class IndexManager {
 			throw new Error(`“${folderName}” already exists in this location.`);
 		}
 
+		const index = this.getIndex(folder);
+		const futureIndexPath = joinPath(
+			folder.path,
+			getFolderIndexFilename(folderName),
+		);
+		const indexNameConflict =
+			this.plugin.app.vault.getAbstractFileByPath(futureIndexPath);
+		if (indexNameConflict && indexNameConflict !== index) {
+			throw new Error(
+				`“${folderName}.md” already exists inside this folder. Rename it before renaming the folder.`,
+			);
+		}
+
 		await this.plugin.app.fileManager.renameFile(folder, newPath);
 		const renamedFolder = this.plugin.app.vault.getFolderByPath(newPath);
 		if (!renamedFolder) {
@@ -203,43 +237,68 @@ export class IndexManager {
 			throw new Error('The vault root cannot be converted yet.');
 		}
 
-		const conventionalIndexPath = joinPath(folder.path, 'index.md');
-		const conventionalIndex =
-			this.plugin.app.vault.getAbstractFileByPath(conventionalIndexPath);
+		const namedIndexPath = this.getExpectedIndexPath(folder);
+		const namedIndex = this.plugin.app.vault.getAbstractFileByPath(namedIndexPath);
+		const legacyIndexPath = joinPath(folder.path, 'index.md');
+		const legacyIndex =
+			legacyIndexPath === namedIndexPath
+				? null
+				: this.plugin.app.vault.getAbstractFileByPath(legacyIndexPath);
 		const previousOwnedIndexes = folder.children.filter(
 			(child): child is TFile => this.isOwnedIndex(child),
 		);
 		let index: TFile;
 
-		if (conventionalIndex instanceof TFile && !this.isOwnedIndex(conventionalIndex)) {
-			await this.plugin.app.vault.process(conventionalIndex, (document) =>
+		let adoptionCandidate: TFile | null = null;
+		if (namedIndex instanceof TFile && !this.isOwnedIndex(namedIndex)) {
+			adoptionCandidate = namedIndex;
+		} else if (
+			!namedIndex &&
+			legacyIndex instanceof TFile &&
+			!this.isOwnedIndex(legacyIndex)
+		) {
+			adoptionCandidate = legacyIndex;
+		}
+
+		if (adoptionCandidate) {
+			await this.plugin.app.vault.process(adoptionCandidate, (document) =>
 				replaceManagedBlock(document, []),
 			);
 			const indexId = createIndexId();
-			this.ownedIndexPaths.add(conventionalIndexPath);
-			await this.writeOwnershipMetadata(conventionalIndex, folder, indexId);
-			index = conventionalIndex;
+			this.ownedIndexPaths.add(adoptionCandidate.path);
+			await this.writeOwnershipMetadata(adoptionCandidate, folder, indexId);
+			index = adoptionCandidate;
 			this.emitOwnedIndexesChanged();
 
 			for (const previousIndex of previousOwnedIndexes) {
-				if (previousIndex.path !== conventionalIndexPath) {
+				if (previousIndex.path !== adoptionCandidate.path) {
 					await this.retirePreviousIndex(previousIndex, folder);
 				}
 			}
-		} else if (conventionalIndex instanceof TFile) {
-			index = conventionalIndex;
+		} else if (namedIndex instanceof TFile && this.isOwnedIndex(namedIndex)) {
+			index = namedIndex;
 			for (const previousIndex of previousOwnedIndexes) {
-				if (previousIndex.path !== conventionalIndexPath) {
+				if (previousIndex.path !== namedIndexPath) {
 					await this.retirePreviousIndex(previousIndex, folder);
 				}
 			}
-		} else if (conventionalIndex) {
-			throw new Error('The existing index.md path is not a Markdown file.');
+		} else if (namedIndex) {
+			throw new Error(
+				`The required “${getFolderIndexFilename(folder.name)}” path is not a Markdown file.`,
+			);
+		} else if (legacyIndex && !(legacyIndex instanceof TFile)) {
+			throw new Error('The legacy index.md path is not a Markdown file.');
 		} else if (previousOwnedIndexes[0]) {
 			index = previousOwnedIndexes[0];
 		} else {
 			index = await this.ensureIndex(folder);
 		}
+
+		const alignedIndex = await this.alignOwnedIndexName(folder, index);
+		if (!alignedIndex) {
+			throw new Error('Could not locate the folder note after conversion.');
+		}
+		index = alignedIndex;
 
 		await this.syncFolder(folder);
 		this.scheduleFolderSync(folder.parent?.path ?? '');
@@ -277,7 +336,7 @@ export class IndexManager {
 		this.ownedIndexPaths.delete(index.path);
 		this.emitOwnedIndexesChanged();
 		new Notice(
-			`Kept customized previous index as “${index.name}” after adopting index.md.`,
+			`Kept customized previous index as “${index.name}” after adopting the folder note.`,
 		);
 	}
 
@@ -338,34 +397,50 @@ export class IndexManager {
 	}
 
 	private getConventionalIndex(folder: TFolder): TFile | null {
-		return this.plugin.app.vault.getFileByPath(joinPath(folder.path, 'index.md'));
+		return (
+			this.plugin.app.vault.getFileByPath(this.getExpectedIndexPath(folder)) ??
+			this.plugin.app.vault.getFileByPath(joinPath(folder.path, 'index.md'))
+		);
+	}
+
+	private getExpectedIndexPath(folder: TFolder): string {
+		return normalizePath(getFolderIndexPath(folder.path, folder.name));
 	}
 
 	private refreshOwnedIndexPaths(): void {
 		this.ownedIndexPaths.clear();
-		for (const file of this.plugin.app.vault.getMarkdownFiles()) {
-			if (this.cacheSaysOwned(file)) {
-				this.ownedIndexPaths.add(file.path);
-				this.scheduleFolderSync(file.parent?.path ?? '');
-				const frontmatter =
-					this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
-				if (
-					file.parent &&
-					(frontmatter?.[INDEX_FOLDER_NAME_KEY] !== file.parent.name ||
-						this.hasManagedFolderAlias(frontmatter, file.parent.name))
-				) {
-					const rawIndexId: unknown = frontmatter?.[INDEX_ID_KEY];
-					void this.writeOwnershipMetadata(
-						file,
-						file.parent,
-						typeof rawIndexId === 'string' ? rawIndexId : createIndexId(),
-					).catch((error: unknown) => {
-						console.error(`Could not refresh metadata for ${file.path}.`, error);
-					});
-				}
-			}
+		const ownedFiles = this.plugin.app.vault
+			.getMarkdownFiles()
+			.filter((file) => this.cacheSaysOwned(file));
+		for (const file of ownedFiles) {
+			this.ownedIndexPaths.add(file.path);
+			this.scheduleFolderSync(file.parent?.path ?? '');
 		}
 		this.emitOwnedIndexesChanged();
+
+		for (const file of ownedFiles) {
+			const folder = file.parent;
+			if (!folder || folder.isRoot()) continue;
+			const indexesInFolder = folder.children.filter(
+				(child): child is TFile => this.isOwnedIndex(child),
+			);
+			if (indexesInFolder.length !== 1) continue;
+
+			const frontmatter =
+				this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
+			const needsRefresh =
+				file.path !== this.getExpectedIndexPath(folder) ||
+				frontmatter?.[INDEX_FOLDER_NAME_KEY] !== folder.name ||
+				this.hasManagedFolderAlias(frontmatter, folder.name);
+			if (!needsRefresh) continue;
+
+			void this.refreshOwnershipMetadata(folder).catch((error: unknown) => {
+				console.error(`Could not migrate folder note ${file.path}.`, error);
+				new Notice(
+					`Could not rename the folder note for “${folder.name}”. Check for a conflicting file.`,
+				);
+			});
+		}
 	}
 
 	private emitOwnedIndexesChanged(): void {
@@ -387,7 +462,12 @@ export class IndexManager {
 
 	private async createIndex(folder: TFolder): Promise<TFile> {
 		const indexId = createIndexId();
-		const indexPath = this.chooseIndexPath(folder, indexId);
+		const indexPath = this.getExpectedIndexPath(folder);
+		if (this.plugin.app.vault.getAbstractFileByPath(indexPath)) {
+			throw new Error(
+				`“${getFolderIndexFilename(folder.name)}” already exists. Use Convert (indexed) to adopt it.`,
+			);
+		}
 		this.pendingIndexCreates.add(indexPath);
 
 		try {
@@ -401,24 +481,6 @@ export class IndexManager {
 		} finally {
 			this.pendingIndexCreates.delete(indexPath);
 		}
-	}
-
-	private chooseIndexPath(folder: TFolder, indexId: string): string {
-		const preferredPath = joinPath(folder.path, 'index.md');
-		if (!this.plugin.app.vault.getAbstractFileByPath(preferredPath)) {
-			return preferredPath;
-		}
-
-		const shortId = indexId.slice(0, 8);
-		for (let attempt = 0; attempt < MAX_INDEX_FILENAME_ATTEMPTS; attempt++) {
-			const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
-			const candidate = joinPath(folder.path, `index-${shortId}${suffix}.md`);
-			if (!this.plugin.app.vault.getAbstractFileByPath(candidate)) {
-				return candidate;
-			}
-		}
-
-		throw new Error(`Could not choose a unique index filename for ${folder.path}.`);
 	}
 
 	private async convertNoteToIndex(file: TFile): Promise<TFolder> {
@@ -447,7 +509,11 @@ export class IndexManager {
 		}
 
 		const indexId = createIndexId();
-		const indexPath = this.chooseIndexPath(folder, indexId);
+		const indexPath = this.getExpectedIndexPath(folder);
+		const indexConflict = this.plugin.app.vault.getAbstractFileByPath(indexPath);
+		if (indexConflict && indexConflict !== file) {
+			throw new Error(`“${getFolderIndexFilename(folder.name)}” already exists.`);
+		}
 		await this.plugin.app.fileManager.renameFile(file, indexPath);
 		this.ownedIndexPaths.add(file.path);
 		await this.writeOwnershipMetadata(file, folder, indexId);
@@ -489,16 +555,84 @@ export class IndexManager {
 	}
 
 	private async refreshOwnershipMetadata(folder: TFolder): Promise<void> {
-		const index = this.getIndex(folder);
-		if (!index) return;
+		const inProgress = this.refreshingOwnership.get(folder.path);
+		if (inProgress) return inProgress;
+
+		const promise = this.performRefreshOwnershipMetadata(folder).finally(() => {
+			if (this.refreshingOwnership.get(folder.path) === promise) {
+				this.refreshingOwnership.delete(folder.path);
+			}
+		});
+		this.refreshingOwnership.set(folder.path, promise);
+		return promise;
+	}
+
+	private async performRefreshOwnershipMetadata(folder: TFolder): Promise<void> {
+		const currentIndex = this.getIndex(folder);
+		if (!currentIndex) return;
 		const frontmatter =
-			this.plugin.app.metadataCache.getFileCache(index)?.frontmatter;
+			this.plugin.app.metadataCache.getFileCache(currentIndex)?.frontmatter;
 		const rawIndexId: unknown = frontmatter?.[INDEX_ID_KEY];
+		const index = await this.alignOwnedIndexName(folder, currentIndex);
+		if (!index) return;
 		await this.writeOwnershipMetadata(
 			index,
 			folder,
 			typeof rawIndexId === 'string' ? rawIndexId : createIndexId(),
 		);
+	}
+
+	private async alignOwnedIndexName(
+		folder: TFolder,
+		candidate?: TFile,
+	): Promise<TFile | null> {
+		const inProgress = this.aligningIndexes.get(folder.path);
+		if (inProgress) return inProgress;
+
+		const promise = this.performAlignOwnedIndexName(folder, candidate).finally(
+			() => {
+				if (this.aligningIndexes.get(folder.path) === promise) {
+					this.aligningIndexes.delete(folder.path);
+				}
+			},
+		);
+		this.aligningIndexes.set(folder.path, promise);
+		return promise;
+	}
+
+	private async performAlignOwnedIndexName(
+		folder: TFolder,
+		candidate?: TFile,
+	): Promise<TFile | null> {
+		const index = candidate ?? this.getIndex(folder);
+		if (!index) return null;
+
+		const expectedPath = this.getExpectedIndexPath(folder);
+		if (index.path === expectedPath) return index;
+
+		const conflict = this.plugin.app.vault.getAbstractFileByPath(expectedPath);
+		if (conflict && conflict !== index) {
+			throw new Error(
+				`Could not rename the folder note to “${getFolderIndexFilename(folder.name)}” because that path already exists.`,
+			);
+		}
+
+		const oldPath = index.path;
+		await this.plugin.app.fileManager.renameFile(index, expectedPath);
+		let renamedIndex = this.plugin.app.vault.getFileByPath(expectedPath);
+		for (let attempt = 0; !renamedIndex && attempt < 10; attempt++) {
+			await new Promise<void>((resolve) => {
+				window.setTimeout(resolve, 20);
+			});
+			renamedIndex = this.plugin.app.vault.getFileByPath(expectedPath);
+		}
+		if (!renamedIndex) {
+			throw new Error('The folder note was renamed but could not be found afterward.');
+		}
+		this.ownedIndexPaths.delete(oldPath);
+		this.ownedIndexPaths.add(renamedIndex.path);
+		this.emitOwnedIndexesChanged();
+		return renamedIndex;
 	}
 
 	private scheduleFolderSync(folderPath: string): void {
@@ -609,9 +743,21 @@ export class IndexManager {
 		this.scheduleFolderSync(file.parent?.path ?? '');
 
 		if (file instanceof TFile) {
-			if (this.ownedIndexPaths.delete(oldPath) || this.cacheSaysOwned(file)) {
+			const owned =
+				this.ownedIndexPaths.delete(oldPath) || this.cacheSaysOwned(file);
+			if (owned) {
 				this.ownedIndexPaths.add(file.path);
 				this.emitOwnedIndexesChanged();
+				if (file.parent && !file.parent.isRoot()) {
+					try {
+						await this.refreshOwnershipMetadata(file.parent);
+					} catch (error) {
+						console.error(`Could not align folder note ${file.path}.`, error);
+						new Notice(
+							'Could not keep a folder note name synchronized. Check for a conflicting file.',
+						);
+					}
+				}
 			}
 			return;
 		}
