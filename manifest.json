@@ -1,0 +1,9 @@
+{
+	"id": "index-plugin",
+	"name": "Index Plugin",
+	"version": "0.1.0",
+	"minAppVersion": "1.0.0",
+	"description": "Tools for working with indexes in Obsidian.",
+	"author": "Said Mukhamad",
+	"isDesktopOnly": false
+}
