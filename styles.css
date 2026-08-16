@@ -38,6 +38,15 @@
 	visibility: hidden;
 }
 
+.workspace-leaf:has(.index-plugin-index-view)
+	.view-header-title-parent
+	> .view-header-breadcrumb:nth-last-child(2),
+.workspace-leaf:has(.index-plugin-index-view)
+	.view-header-title-parent
+	> .view-header-breadcrumb-separator:last-child {
+	display: none !important;
+}
+
 .callout[data-callout='index-pages'] {
 	--callout-color: var(--interactive-accent-rgb);
 	--callout-icon: lucide-files;
