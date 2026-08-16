@@ -1,1 +1,99 @@
-/* Plugin styles live here. This file is rebuilt and hot-reloaded with the plugin. */
+.index-plugin-owned-index {
+	display: none !important;
+}
+
+.index-plugin-indexed-folder .nav-folder-title-content {
+	cursor: pointer;
+}
+
+.index-plugin-name-error {
+	color: var(--text-error);
+	min-height: var(--font-ui-small);
+}
+
+.index-plugin-managed-marker {
+	display: none;
+}
+
+.index-plugin-index-view
+	.metadata-property[data-property-key='index-plugin'],
+.index-plugin-index-view
+	.metadata-property[data-property-key='index-plugin-id'],
+.index-plugin-index-view
+	.metadata-property[data-property-key='index-plugin-folder-name'],
+.index-plugin-managed-alias
+	.metadata-property[data-property-key='aliases'],
+.index-plugin-hide-properties .metadata-container,
+.index-plugin-internal-properties-container {
+	display: none;
+}
+
+.index-plugin-index-view .metadata-properties-heading,
+.index-plugin-index-view .metadata-add-button {
+	display: none;
+}
+
+.index-plugin-internal-properties-status {
+	display: none !important;
+	visibility: hidden;
+}
+
+.callout[data-callout='index-pages'] {
+	--callout-color: var(--interactive-accent-rgb);
+	--callout-icon: lucide-files;
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	margin-block: 2rem 0;
+	padding: 0;
+}
+
+.callout[data-callout='index-pages'] > .callout-title {
+	align-items: center;
+	border-bottom: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	letter-spacing: 0.08em;
+	padding: 0 0 0.55rem;
+	text-transform: uppercase;
+}
+
+.callout[data-callout='index-pages'] > .callout-content {
+	padding: 0.55rem 0 0;
+}
+
+.callout[data-callout='index-pages'] > .callout-content > ul {
+	display: grid;
+	gap: 0.2rem;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.callout[data-callout='index-pages'] > .callout-content > ul > li {
+	margin: 0;
+	padding: 0;
+}
+
+.callout[data-callout='index-pages'] .internal-link {
+	border-radius: var(--radius-s);
+	color: var(--text-normal);
+	display: block;
+	font-weight: var(--font-medium);
+	padding: 0.45rem 0.6rem;
+	text-decoration: none;
+}
+
+.callout[data-callout='index-pages'] .internal-link::before {
+	color: var(--text-faint);
+	content: '↳';
+	display: inline-block;
+	margin-inline-end: 0.55rem;
+}
+
+.callout[data-callout='index-pages'] .internal-link:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-accent-hover);
+}

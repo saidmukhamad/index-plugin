@@ -10,7 +10,8 @@
 		"typecheck": "tsc --noEmit --skipLibCheck",
 		"build": "npm run typecheck && node esbuild.config.mjs production",
 		"lint": "eslint .",
-		"check": "npm run lint && npm run build",
+		"test": "node --experimental-strip-types --test tests/index-document.test.ts tests/note-name.test.ts",
+		"check": "npm run lint && npm run test && npm run build",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
 	"keywords": [
@@ -19,6 +20,8 @@
 	],
 	"license": "UNLICENSED",
 	"devDependencies": {
+		"@codemirror/state": "^6.5.0",
+		"@codemirror/view": "^6.38.6",
 		"@eslint/js": "^9.39.4",
 		"@types/node": "^22.15.17",
 		"esbuild": "0.25.5",
