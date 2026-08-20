@@ -9,9 +9,10 @@
 		"dev": "npm run setup && node esbuild.config.mjs",
 		"typecheck": "tsc --noEmit --skipLibCheck",
 		"build": "npm run typecheck && node esbuild.config.mjs production",
+		"cleanup:daily-links": "node --experimental-strip-types scripts/cleanup-daily-links.mjs",
 		"lint": "eslint .",
 		"migrate:vault": "node --experimental-strip-types scripts/migrate-vault.mjs",
-		"test": "node --experimental-strip-types --test tests/index-document.test.ts tests/index-path.test.ts tests/migration-plan.test.ts tests/note-name.test.ts tests/settings.test.ts",
+		"test": "node --experimental-strip-types --test tests/daily-links.test.ts tests/index-document.test.ts tests/index-path.test.ts tests/migration-plan.test.ts tests/note-name.test.ts tests/settings.test.ts",
 		"check": "npm run lint && npm run test && npm run build",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
