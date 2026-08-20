@@ -14,6 +14,8 @@ Index Plugin gives an indexed folder its own Markdown document, opens that docum
 - **Useful Graph View nodes.** Folder notes use real folder names instead of a sea of files called `index`.
 - **Note-to-folder conversion.** Run **Create new (indexed)** on `Project.md` to turn it into `Project/Project.md` and create a linked child note.
 - **Safe existing-folder adoption.** **Convert (indexed)** preserves existing Markdown, whether it starts from `Folder/Folder.md` or a legacy `Folder/index.md`.
+- **Preview-first tree migration.** Migrate an existing folder hierarchy with a depth limit, automatic backups, conflict reporting, and optional cleanup of empty sidecar duplicates.
+- **Managed roots.** Keep automatic indexing and same-name-note adoption inside selected folder trees without touching deeper attachment or project directories.
 - **Quiet internals.** Plugin ownership properties, update markers, and owned folder-note files stay out of the way in Obsidian's interface.
 - **User content stays yours.** The plugin rewrites only its marked Pages block and leaves headings, prose, and user properties untouched.
 
@@ -39,6 +41,7 @@ Nested folder notes follow the same convention. Breadcrumbs collapse the duplica
 
 - **Create new (indexed)** — create a linked child note, converting the current note into a folder first when needed.
 - **Convert (indexed)** — adopt or create the selected folder's note without replacing existing content.
+- **Migrate folder tree (indexed)…** — preview, back up, and convert a selected folder and its descendants.
 - **Open folder index** — open the selected folder's note.
 - **Initialize indexes for all folders** — explicitly convert every existing non-root folder.
 

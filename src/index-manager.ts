@@ -16,9 +16,27 @@ import {
 	replaceManagedBlock,
 } from './index-document';
 import { getFolderIndexFilename, getFolderIndexPath } from './index-path';
+import {
+	buildMigrationPlan,
+	getMigrationDepth,
+	type MigrationEntryDescriptor,
+	type MigrationPlan,
+} from './migration-plan';
 import { normalizeFolderName, normalizeNoteName } from './note-name';
+import {
+	type IndexPluginSettings,
+	shouldAutoAdoptFolder,
+	shouldAutoIndexFolder,
+} from './settings';
 
 const SYNC_DELAY_MS = 120;
+const AUTO_INDEX_DELAY_MS = 750;
+
+export interface MigrationApplyResult {
+	backupPath: string;
+	convertedFolderCount: number;
+	trashedDuplicateCount: number;
+}
 
 function joinPath(parent: string, child: string): string {
 	return normalizePath(parent ? `${parent}/${child}` : child);
@@ -44,11 +62,17 @@ export class IndexManager {
 	private readonly aligningIndexes = new Map<string, Promise<TFile | null>>();
 	private readonly refreshingOwnership = new Map<string, Promise<void>>();
 	private readonly pendingFolderSyncs = new Set<string>();
+	private readonly pendingFolderInitializations = new Map<string, number>();
 	private readonly ownedIndexListeners = new Set<() => void>();
 	private syncTimer: number | null = null;
+	private migrationInProgress = false;
+	private activeMigrationScope: { rootPath: string; maxDepth: number } | null = null;
 	private disposed = false;
 
-	constructor(private readonly plugin: Plugin) {}
+	constructor(
+		private readonly plugin: Plugin,
+		private readonly getSettings: () => IndexPluginSettings,
+	) {}
 
 	start(): void {
 		this.disposed = false;
@@ -58,6 +82,11 @@ export class IndexManager {
 			this.plugin.registerEvent(
 				this.plugin.app.vault.on('create', (file) => {
 					void this.handleCreate(file);
+				}),
+			);
+			this.plugin.registerEvent(
+				this.plugin.app.vault.on('modify', (file) => {
+					if (file instanceof TFile) this.handleModify(file);
 				}),
 			);
 			this.plugin.registerEvent(
@@ -116,6 +145,10 @@ export class IndexManager {
 			this.syncTimer = null;
 		}
 		this.pendingFolderSyncs.clear();
+		for (const timer of this.pendingFolderInitializations.values()) {
+			window.clearTimeout(timer);
+		}
+		this.pendingFolderInitializations.clear();
 		this.aligningIndexes.clear();
 		this.refreshingOwnership.clear();
 		this.ownedIndexListeners.clear();
@@ -303,6 +336,178 @@ export class IndexManager {
 		await this.syncFolder(folder);
 		this.scheduleFolderSync(folder.parent?.path ?? '');
 		return index;
+	}
+
+	createMigrationPlan(root: TFolder, maxDepth: number): MigrationPlan {
+		if (root.isRoot()) {
+			throw new Error('The vault root cannot be migrated yet.');
+		}
+		const entries: MigrationEntryDescriptor[] = [];
+		const visit = (folder: TFolder): void => {
+			entries.push({ path: folder.path, kind: 'folder' });
+			for (const child of folder.children) {
+				if (child instanceof TFolder) visit(child);
+				else if (child instanceof TFile) {
+					entries.push({
+						path: child.path,
+						kind: 'file',
+						size: child.stat.size,
+					});
+				}
+			}
+		};
+		visit(root);
+		const sidecar = this.plugin.app.vault.getFileByPath(`${root.path}.md`);
+		if (sidecar) {
+			entries.push({
+				path: sidecar.path,
+				kind: 'file',
+				size: sidecar.stat.size,
+			});
+		}
+		return buildMigrationPlan(root.path, maxDepth, entries);
+	}
+
+	async applyMigrationPlan(
+		plan: MigrationPlan,
+		trashEmptyDuplicates: boolean,
+		onProgress?: (completed: number, total: number, folderPath: string) => void,
+	): Promise<MigrationApplyResult> {
+		if (plan.blockers.length > 0) {
+			throw new Error('Resolve migration blockers before applying this plan.');
+		}
+		const root = this.plugin.app.vault.getFolderByPath(plan.rootPath);
+		if (!root) throw new Error(`Could not find “${plan.rootPath}”.`);
+		const currentPlan = this.createMigrationPlan(root, plan.maxDepth);
+		if (this.getMigrationSignature(plan) !== this.getMigrationSignature(currentPlan)) {
+			throw new Error('The folder tree changed. Review a fresh migration preview.');
+		}
+		const backupPath = await this.writeMigrationBackup(plan);
+		const actions = [...plan.actions].sort((left, right) =>
+			left.depth === right.depth
+				? left.folderPath.localeCompare(right.folderPath)
+				: right.depth - left.depth,
+		);
+		let completed = 0;
+		this.migrationInProgress = true;
+		this.activeMigrationScope = {
+			rootPath: plan.rootPath,
+			maxDepth: plan.maxDepth,
+		};
+
+		try {
+			for (const action of actions) {
+				if (action.kind === 'move-sidecar-and-adopt') {
+					const source = action.sourcePath
+						? this.plugin.app.vault.getFileByPath(action.sourcePath)
+						: null;
+					if (!source) {
+						throw new Error(`Could not find sidecar note “${action.sourcePath}”.`);
+					}
+					if (this.plugin.app.vault.getAbstractFileByPath(action.targetPath)) {
+						throw new Error(`“${action.targetPath}” appeared during migration.`);
+					}
+					await this.plugin.app.fileManager.renameFile(source, action.targetPath);
+				}
+
+				const folder = this.plugin.app.vault.getFolderByPath(action.folderPath);
+				if (!folder) throw new Error(`Could not find “${action.folderPath}”.`);
+				await this.convertFolder(folder);
+				completed += 1;
+				onProgress?.(completed, actions.length, action.folderPath);
+			}
+		} finally {
+			this.migrationInProgress = false;
+			this.activeMigrationScope = null;
+		}
+
+		let trashedDuplicateCount = 0;
+		if (trashEmptyDuplicates) {
+			for (const duplicate of plan.duplicates) {
+				if (duplicate.size !== 0) continue;
+				const file = this.plugin.app.vault.getFileByPath(duplicate.path);
+				if (!file || file.stat.size !== 0 || this.isOwnedIndex(file)) continue;
+				await this.plugin.app.fileManager.trashFile(file);
+				trashedDuplicateCount += 1;
+			}
+		}
+
+		return {
+			backupPath,
+			convertedFolderCount: completed,
+			trashedDuplicateCount,
+		};
+	}
+
+	private getMigrationSignature(plan: MigrationPlan): string {
+		return JSON.stringify({
+			actions: plan.actions.map((action) => [
+				action.folderPath,
+				action.kind,
+				action.sourcePath,
+				action.targetPath,
+			]),
+			duplicates: plan.duplicates.map((duplicate) => [
+				duplicate.path,
+				duplicate.size,
+			]),
+			blockers: plan.blockers.map((blocker) => [
+				blocker.path,
+				blocker.reason,
+			]),
+		});
+	}
+
+	private async writeMigrationBackup(plan: MigrationPlan): Promise<string> {
+		const filePaths = new Set<string>();
+		for (const action of plan.actions) {
+			if (action.sourcePath) filePaths.add(action.sourcePath);
+		}
+		for (const duplicate of plan.duplicates) filePaths.add(duplicate.path);
+		const files = [];
+		for (const path of filePaths) {
+			const file = this.plugin.app.vault.getFileByPath(path);
+			if (!file) continue;
+			files.push({
+				path: file.path,
+				content: await this.plugin.app.vault.read(file),
+				ctime: file.stat.ctime,
+				mtime: file.stat.mtime,
+			});
+		}
+		const pluginDirectory =
+			this.plugin.manifest.dir ??
+			`${this.plugin.app.vault.configDir}/plugins/${this.plugin.manifest.id}`;
+		const backupDirectory = normalizePath(`${pluginDirectory}/migration-backups`);
+		await this.ensureAdapterDirectory(backupDirectory);
+		const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+		const backupPath = normalizePath(
+			`${backupDirectory}/${timestamp}-${plan.rootPath.replace(/\//g, '-')}.json`,
+		);
+		await this.plugin.app.vault.adapter.write(
+			backupPath,
+			JSON.stringify(
+				{
+					version: 1,
+					createdAt: new Date().toISOString(),
+					plan,
+					files,
+				},
+				null,
+				2,
+			),
+		);
+		return backupPath;
+	}
+
+	private async ensureAdapterDirectory(path: string): Promise<void> {
+		let current = '';
+		for (const part of path.split('/')) {
+			current = joinPath(current, part);
+			if (!(await this.plugin.app.vault.adapter.exists(current))) {
+				await this.plugin.app.vault.adapter.mkdir(current);
+			}
+		}
 	}
 
 	private async retirePreviousIndex(index: TFile, folder: TFolder): Promise<void> {
@@ -683,10 +888,12 @@ export class IndexManager {
 
 		for (const child of children) {
 			if (child instanceof TFolder) {
-				const childIndex =
-					this.getIndex(child) ??
-					this.getConventionalIndex(child) ??
-					(await this.ensureIndex(child));
+				let childIndex =
+					this.getIndex(child) ?? this.getConventionalIndex(child);
+				if (!childIndex) {
+					if (!this.shouldIndexFolder(child.path)) continue;
+					childIndex = await this.ensureIndex(child);
+				}
 				const link = this.plugin.app.fileManager.generateMarkdownLink(
 					childIndex,
 					index.path,
@@ -714,27 +921,82 @@ export class IndexManager {
 	private async handleCreate(file: TAbstractFile): Promise<void> {
 		if (file instanceof TFolder) {
 			if (this.suppressedFolderCreates.has(file.path)) return;
-			try {
-				await new Promise<void>((resolve) => {
-					window.setTimeout(resolve, SYNC_DELAY_MS);
-				});
-				if (this.disposed) return;
-				const currentFolder = this.plugin.app.vault.getFolderByPath(file.path);
-				if (!currentFolder) return;
-				const conventionalIndex = this.getConventionalIndex(currentFolder);
-				if (conventionalIndex && !this.isOwnedIndex(conventionalIndex)) return;
-				await this.ensureIndex(currentFolder);
-				this.scheduleFolderSync(currentFolder.path);
-				this.scheduleFolderSync(currentFolder.parent?.path ?? '');
-			} catch (error) {
-				console.error(`Could not initialize ${file.path}.`, error);
-				new Notice('Could not create a folder index. Check the developer console.');
-			}
+			this.scheduleFolderInitialization(file);
 			return;
 		}
 
 		if (this.pendingIndexCreates.has(file.path)) return;
 		this.scheduleFolderSync(file.parent?.path ?? '');
+		if (file instanceof TFile) this.scheduleConventionalIndexAdoption(file);
+	}
+
+	private handleModify(file: TFile): void {
+		this.scheduleConventionalIndexAdoption(file);
+	}
+
+	private scheduleConventionalIndexAdoption(file: TFile): void {
+		const folder = file.parent;
+		if (
+			!folder ||
+			folder.isRoot() ||
+			file.extension !== 'md' ||
+			file.path !== this.getExpectedIndexPath(folder) ||
+			this.isOwnedIndex(file) ||
+			!shouldAutoAdoptFolder(this.getSettings(), folder.path)
+		) {
+			return;
+		}
+		this.scheduleFolderInitialization(folder);
+	}
+
+	private scheduleFolderInitialization(folder: TFolder): void {
+		if (
+			this.disposed ||
+			this.migrationInProgress ||
+			!shouldAutoIndexFolder(this.getSettings(), folder.path)
+		) {
+			return;
+		}
+		const existingTimer = this.pendingFolderInitializations.get(folder.path);
+		if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+		const timer = window.setTimeout(() => {
+			this.pendingFolderInitializations.delete(folder.path);
+			void this.initializeManagedFolder(folder.path);
+		}, AUTO_INDEX_DELAY_MS);
+		this.pendingFolderInitializations.set(folder.path, timer);
+	}
+
+	private shouldIndexFolder(folderPath: string): boolean {
+		if (this.activeMigrationScope) {
+			const depth = getMigrationDepth(
+				this.activeMigrationScope.rootPath,
+				folderPath,
+			);
+			return depth !== null && depth <= this.activeMigrationScope.maxDepth;
+		}
+		return shouldAutoIndexFolder(this.getSettings(), folderPath);
+	}
+
+	private async initializeManagedFolder(folderPath: string): Promise<void> {
+		if (this.disposed || this.migrationInProgress) return;
+		const folder = this.plugin.app.vault.getFolderByPath(folderPath);
+		if (!folder || !shouldAutoIndexFolder(this.getSettings(), folder.path)) return;
+
+		try {
+			const conventionalIndex = this.getConventionalIndex(folder);
+			if (conventionalIndex && !this.isOwnedIndex(conventionalIndex)) {
+				if (shouldAutoAdoptFolder(this.getSettings(), folder.path)) {
+					await this.convertFolder(folder);
+				}
+				return;
+			}
+			await this.ensureIndex(folder);
+			this.scheduleFolderSync(folder.path);
+			this.scheduleFolderSync(folder.parent?.path ?? '');
+		} catch (error) {
+			console.error(`Could not initialize ${folder.path}.`, error);
+			new Notice('Could not create a folder index. Check the developer console.');
+		}
 	}
 
 	private async handleRename(file: TAbstractFile, oldPath: string): Promise<void> {
