@@ -40,15 +40,3 @@ The generated child list is rendered as a styled **Pages** panel and bounded by 
 - `npm version patch|minor|major` — update package, manifest, and compatibility versions together.
 
 Release assets are `dist/main.js`, `dist/manifest.json`, and `dist/styles.css`.
-
-## Project layout
-
-```text
-src/          TypeScript source
-styles.css    Plugin styles
-dist/         Generated plugin/release files
-dev/          Disposable Obsidian development vault
-scripts/      Local development setup
-```
-
-Do not develop against a real vault: plugin mistakes can modify or delete notes. The official [Build a plugin guide](https://docs.obsidian.md/Plugins/Getting%20started/Build%20a%20plugin) recommends a dedicated vault for this reason.
