@@ -61,3 +61,13 @@ Open `dev/` as an Obsidian vault and enable community plugins if prompted. The s
 - `npm version patch|minor|major` — update package, manifest, and compatibility versions together.
 
 Release assets are `dist/main.js`, `dist/manifest.json`, and `dist/styles.css`.
+
+### Migration CLI
+
+Preview a scoped migration without writing anything:
+
+```bash
+npm run migrate:vault -- --vault /absolute/path/to/vault --root logs --max-depth 3
+```
+
+After reviewing the preview, add `--apply`. Add `--trash-empty-duplicates` only when the reported duplicates are safe to move into the vault's recoverable trash. The command writes a restoration manifest under `.obsidian/plugins/index-plugin/migration-backups/` before changing notes.
