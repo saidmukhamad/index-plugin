@@ -9,6 +9,7 @@ import {
 } from 'obsidian';
 import { hideManagedMarkersExtension } from './editor-markers';
 import { ExplorerIntegration } from './explorer-integration';
+import { FolderNameModal } from './folder-name-modal';
 import { IndexManager } from './index-manager';
 import { MigrationModal } from './migration-modal';
 import { NoteNameModal } from './note-name-modal';
@@ -43,6 +44,14 @@ export default class IndexPlugin extends Plugin {
 			}
 			void this.promptAndCreate(file);
 		});
+		this.addRibbonIcon('folder-plus', 'Create folder', () => {
+			const file = this.app.workspace.getActiveFile();
+			if (!file) {
+				new Notice('Open a note before creating a folder here.');
+				return;
+			}
+			void this.promptAndCreateFolder(file);
+		});
 
 		this.addCommand({
 			id: 'create-new-indexed',
@@ -51,6 +60,17 @@ export default class IndexPlugin extends Plugin {
 				const file = this.app.workspace.getActiveFile();
 				const available = file instanceof TFile && file.extension === 'md';
 				if (available && !checking) void this.promptAndCreate(file);
+				return available;
+			},
+		});
+
+		this.addCommand({
+			id: 'create-folder',
+			name: 'Create folder',
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				const available = file instanceof TFile;
+				if (available && !checking) void this.promptAndCreateFolder(file);
 				return available;
 			},
 		});
@@ -65,37 +85,47 @@ export default class IndexPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.workspace.on('file-menu', (menu, file) => {
-				if (file instanceof TFolder && !file.isRoot()) {
+				if (file instanceof TFolder) {
+					if (!file.isRoot()) {
+						menu.addItem((item) =>
+							item
+								.setTitle('Migrate folder tree (indexed)…')
+								.setIcon('folder-tree')
+								.onClick(() => {
+									this.openMigration(file);
+								}),
+						);
+						menu.addItem((item) =>
+							item
+								.setTitle('Convert (indexed)')
+								.setIcon('folder-cog')
+								.onClick(() => {
+									void this.convertFolder(file);
+								}),
+						);
+						menu.addItem((item) =>
+							item
+								.setTitle('Open folder index')
+								.setIcon('notebook-tabs')
+								.onClick(() => {
+									void this.indexManager.openIndex(file, false);
+								}),
+						);
+						menu.addItem((item) =>
+							item
+								.setTitle('Create new (indexed)')
+								.setIcon('file-plus-2')
+								.onClick(() => {
+									void this.promptAndCreate(file);
+								}),
+						);
+					}
 					menu.addItem((item) =>
 						item
-							.setTitle('Migrate folder tree (indexed)…')
-							.setIcon('folder-tree')
+							.setTitle('Create folder')
+							.setIcon('folder-plus')
 							.onClick(() => {
-								this.openMigration(file);
-							}),
-					);
-					menu.addItem((item) =>
-						item
-							.setTitle('Convert (indexed)')
-							.setIcon('folder-cog')
-							.onClick(() => {
-								void this.convertFolder(file);
-							}),
-					);
-					menu.addItem((item) =>
-						item
-							.setTitle('Open folder index')
-							.setIcon('notebook-tabs')
-							.onClick(() => {
-								void this.indexManager.openIndex(file, false);
-							}),
-					);
-					menu.addItem((item) =>
-						item
-							.setTitle('Create new (indexed)')
-							.setIcon('file-plus-2')
-							.onClick(() => {
-								void this.promptAndCreate(file);
+								void this.promptAndCreateFolder(file);
 							}),
 					);
 				} else if (file instanceof TFile && file.extension === 'md') {
@@ -105,6 +135,14 @@ export default class IndexPlugin extends Plugin {
 							.setIcon('file-plus-2')
 							.onClick(() => {
 								void this.promptAndCreate(file);
+							}),
+					);
+					menu.addItem((item) =>
+						item
+							.setTitle('Create folder')
+							.setIcon('folder-plus')
+							.onClick(() => {
+								void this.promptAndCreateFolder(file);
 							}),
 					);
 				}
@@ -140,6 +178,18 @@ export default class IndexPlugin extends Plugin {
 		} catch (error) {
 			console.error('Could not create an indexed note.', error);
 			new Notice(error instanceof Error ? error.message : 'Could not create the note.');
+		}
+	}
+
+	private async promptAndCreateFolder(target: TFile | TFolder): Promise<void> {
+		const folderName = await FolderNameModal.prompt(this.app);
+		if (!folderName) return;
+
+		try {
+			await this.indexManager.createPlainFolder(target, folderName);
+		} catch (error) {
+			console.error('Could not create a plain folder.', error);
+			new Notice(error instanceof Error ? error.message : 'Could not create the folder.');
 		}
 	}
 
@@ -197,27 +247,50 @@ class IndexPluginSettingTab extends PluginSettingTab {
 			this.containerEl.createEl('p', {
 				text: 'No managed roots yet. Run “migrate folder tree (indexed)…” from a folder menu to add one.',
 			});
-			return;
+		} else {
+			for (const rule of this.plugin.settings.managedRoots) {
+				new Setting(this.containerEl)
+					.setName(rule.path)
+					.setDesc(
+						`Depth ${rule.maxDepth}; ${rule.autoAdopt ? 'automatically adopts' : 'does not adopt'} same-name notes.`,
+					)
+					.addButton((button) => {
+						button.setButtonText('Remove');
+						button.setWarning();
+						button.onClick(async () => {
+							this.plugin.settings.managedRoots =
+								this.plugin.settings.managedRoots.filter(
+									(item) => item.path !== rule.path,
+								);
+							await this.plugin.saveSettings();
+							this.display();
+						});
+					});
+			}
 		}
 
-		for (const rule of this.plugin.settings.managedRoots) {
-			new Setting(this.containerEl)
-				.setName(rule.path)
-				.setDesc(
-					`Depth ${rule.maxDepth}; ${rule.autoAdopt ? 'automatically adopts' : 'does not adopt'} same-name notes.`,
-				)
-				.addButton((button) => {
-					button.setButtonText('Remove');
-					button.setWarning();
-					button.onClick(async () => {
-						this.plugin.settings.managedRoots =
-							this.plugin.settings.managedRoots.filter(
-								(item) => item.path !== rule.path,
-							);
-						await this.plugin.saveSettings();
-						this.display();
+		new Setting(this.containerEl).setName('Plain folders').setHeading();
+		if (this.plugin.settings.plainFolders.length === 0) {
+			this.containerEl.createEl('p', {
+				text: 'Folders explicitly created without an index appear here.',
+			});
+		} else {
+			for (const path of this.plugin.settings.plainFolders) {
+				new Setting(this.containerEl)
+					.setName(path)
+					.setDesc('Clicking this folder expands it without creating a folder note.')
+					.addButton((button) => {
+						button.setButtonText('Allow indexing');
+						button.onClick(async () => {
+							this.plugin.settings.plainFolders =
+								this.plugin.settings.plainFolders.filter(
+									(item) => item !== path,
+								);
+							await this.plugin.saveSettings();
+							this.display();
+						});
 					});
-				});
+			}
 		}
 	}
 }

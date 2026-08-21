@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
 	DEFAULT_SETTINGS,
 	getManagedRootRule,
+	isPlainFolder,
 	loadIndexPluginSettings,
 	shouldAutoAdoptFolder,
 	shouldAutoIndexFolder,
@@ -30,6 +31,21 @@ void test('scopes automatic indexing and adoption by root depth', () => {
 	assert.equal(getManagedRootRule(settings, 'logs-archive/2026'), null);
 });
 
+void test('keeps explicitly plain folders out of automatic indexing', () => {
+	const settings = {
+		...upsertManagedRoot(DEFAULT_SETTINGS, {
+			path: 'logs',
+			maxDepth: 3,
+			autoAdopt: true,
+		}),
+		plainFolders: ['logs/2026/scratch'],
+	};
+
+	assert.equal(isPlainFolder(settings, '/logs/2026/scratch/'), true);
+	assert.equal(shouldAutoIndexFolder(settings, 'logs/2026/scratch'), false);
+	assert.equal(shouldAutoAdoptFolder(settings, 'logs/2026/scratch'), false);
+});
+
 void test('normalizes loaded settings and rejects invalid roots', () => {
 	assert.deepEqual(
 		loadIndexPluginSettings({
@@ -42,6 +58,7 @@ void test('normalizes loaded settings and rejects invalid roots', () => {
 		{
 			autoIndexNewFolders: false,
 			managedRoots: [{ path: 'logs', maxDepth: 32, autoAdopt: true }],
+			plainFolders: [],
 		},
 	);
 });

@@ -25,6 +25,7 @@ import {
 import { normalizeFolderName, normalizeNoteName } from './note-name';
 import {
 	type IndexPluginSettings,
+	isPlainFolder,
 	shouldAutoAdoptFolder,
 	shouldAutoIndexFolder,
 } from './settings';
@@ -177,9 +178,47 @@ export class IndexManager {
 		return indexes[0] ?? null;
 	}
 
+	isPlainFolder(folder: TFolder): boolean {
+		return isPlainFolder(this.getSettings(), folder.path);
+	}
+
+	async createPlainFolder(
+		target: TFile | TFolder,
+		rawName: string,
+	): Promise<TFolder> {
+		const folderName = normalizeFolderName(rawName);
+		const parent = target instanceof TFolder ? target : target.parent;
+		if (!parent) throw new Error('Could not determine where to create the folder.');
+
+		const folderPath = joinPath(parent.path, folderName);
+		if (this.plugin.app.vault.getAbstractFileByPath(folderPath)) {
+			throw new Error(`“${folderName}” already exists in this location.`);
+		}
+
+		const settings = this.getSettings();
+		settings.plainFolders = [
+			...settings.plainFolders.filter((path) => path !== folderPath),
+			folderPath,
+		];
+		await this.plugin.saveData(settings);
+		this.suppressedFolderCreates.add(folderPath);
+		try {
+			return await this.plugin.app.vault.createFolder(folderPath);
+		} catch (error) {
+			settings.plainFolders = settings.plainFolders.filter(
+				(path) => path !== folderPath,
+			);
+			await this.plugin.saveData(settings);
+			throw error;
+		} finally {
+			this.suppressedFolderCreates.delete(folderPath);
+		}
+	}
+
 	async ensureIndex(folder: TFolder): Promise<TFile> {
 		const existing = this.getIndex(folder);
 		if (existing) return existing;
+		await this.stopTreatingAsPlain(folder.path);
 
 		const inProgress = this.ensuringIndexes.get(folder.path);
 		if (inProgress) return inProgress;
@@ -269,6 +308,7 @@ export class IndexManager {
 		if (folder.isRoot()) {
 			throw new Error('The vault root cannot be converted yet.');
 		}
+		await this.stopTreatingAsPlain(folder.path);
 
 		const namedIndexPath = this.getExpectedIndexPath(folder);
 		const namedIndex = this.plugin.app.vault.getAbstractFileByPath(namedIndexPath);
@@ -1024,7 +1064,24 @@ export class IndexManager {
 			return;
 		}
 
+		const settings = this.getSettings();
 		const oldPrefix = `${oldPath}/`;
+		const renamedPlainFolders = settings.plainFolders.map((path) =>
+			path === oldPath
+				? file.path
+				: path.startsWith(oldPrefix)
+					? `${file.path}/${path.slice(oldPrefix.length)}`
+					: path,
+		);
+		if (
+			renamedPlainFolders.some(
+				(path, index) => path !== settings.plainFolders[index],
+			)
+		) {
+			settings.plainFolders = renamedPlainFolders;
+			await this.plugin.saveData(settings);
+		}
+
 		const newPrefix = `${file.path}/`;
 		for (const ownedPath of [...this.ownedIndexPaths]) {
 			if (!ownedPath.startsWith(oldPrefix)) continue;
@@ -1048,6 +1105,14 @@ export class IndexManager {
 	private handleDelete(file: TAbstractFile): void {
 		if (file instanceof TFolder) {
 			const prefix = `${file.path}/`;
+			const settings = this.getSettings();
+			const remainingPlainFolders = settings.plainFolders.filter(
+				(path) => path !== file.path && !path.startsWith(prefix),
+			);
+			if (remainingPlainFolders.length !== settings.plainFolders.length) {
+				settings.plainFolders = remainingPlainFolders;
+				void this.plugin.saveData(settings);
+			}
 			for (const ownedPath of [...this.ownedIndexPaths]) {
 				if (ownedPath.startsWith(prefix)) this.ownedIndexPaths.delete(ownedPath);
 			}
@@ -1056,5 +1121,14 @@ export class IndexManager {
 		}
 		this.emitOwnedIndexesChanged();
 		this.scheduleFolderSync(file.parent?.path ?? getParentPath(file.path));
+	}
+
+	private async stopTreatingAsPlain(folderPath: string): Promise<void> {
+		const settings = this.getSettings();
+		if (!settings.plainFolders.includes(folderPath)) return;
+		settings.plainFolders = settings.plainFolders.filter(
+			(path) => path !== folderPath,
+		);
+		await this.plugin.saveData(settings);
 	}
 }

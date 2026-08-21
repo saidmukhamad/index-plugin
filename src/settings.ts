@@ -7,11 +7,13 @@ export interface ManagedRootRule {
 export interface IndexPluginSettings {
 	autoIndexNewFolders: boolean;
 	managedRoots: ManagedRootRule[];
+	plainFolders: string[];
 }
 
 export const DEFAULT_SETTINGS: IndexPluginSettings = {
 	autoIndexNewFolders: true,
 	managedRoots: [],
+	plainFolders: [],
 };
 
 function normalizePath(path: string): string {
@@ -44,10 +46,24 @@ export function loadIndexPluginSettings(data: unknown): IndexPluginSettings {
 				.filter((rule): rule is ManagedRootRule => rule !== null)
 		: [];
 	const uniqueRules = new Map(rules.map((rule) => [rule.path, rule]));
+	const plainFolders = Array.isArray(raw.plainFolders)
+		? raw.plainFolders
+				.filter((path): path is string => typeof path === 'string')
+				.map(normalizePath)
+				.filter(Boolean)
+		: [];
 	return {
 		autoIndexNewFolders: raw.autoIndexNewFolders !== false,
 		managedRoots: [...uniqueRules.values()],
+		plainFolders: [...new Set(plainFolders)],
 	};
+}
+
+export function isPlainFolder(
+	settings: IndexPluginSettings,
+	folderPath: string,
+): boolean {
+	return settings.plainFolders.includes(normalizePath(folderPath));
 }
 
 export function upsertManagedRoot(
@@ -85,6 +101,7 @@ export function shouldAutoIndexFolder(
 	settings: IndexPluginSettings,
 	folderPath: string,
 ): boolean {
+	if (isPlainFolder(settings, folderPath)) return false;
 	if (!settings.autoIndexNewFolders) return false;
 	if (settings.managedRoots.length === 0) return true;
 	return getManagedRootRule(settings, folderPath) !== null;
@@ -94,5 +111,6 @@ export function shouldAutoAdoptFolder(
 	settings: IndexPluginSettings,
 	folderPath: string,
 ): boolean {
+	if (isPlainFolder(settings, folderPath)) return false;
 	return getManagedRootRule(settings, folderPath)?.autoAdopt === true;
 }

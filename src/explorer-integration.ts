@@ -333,7 +333,10 @@ export class ExplorerIntegration {
 			.querySelectorAll<HTMLElement>('.nav-folder-title[data-path]')
 			.forEach((title) => {
 				const path = title.dataset.path;
-				if (path) {
+				const folder = path
+					? this.plugin.app.vault.getFolderByPath(path)
+					: null;
+				if (folder && !this.manager.isPlainFolder(folder)) {
 					title.classList.add(INDEXED_FOLDER_CLASS);
 				}
 			});
@@ -349,6 +352,7 @@ export class ExplorerIntegration {
 
 		const folder = this.plugin.app.vault.getFolderByPath(folderPath);
 		if (!(folder instanceof TFolder) || folder.isRoot()) return;
+		if (this.manager.isPlainFolder(folder)) return;
 
 		event.preventDefault();
 		event.stopImmediatePropagation();
