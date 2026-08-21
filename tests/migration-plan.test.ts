@@ -67,6 +67,25 @@ void test('reports duplicate sidecars without deleting them', () => {
 	]);
 });
 
+void test('adopts a same-name note with mismatched casing', () => {
+	const plan = buildMigrationPlan('stuff', 1, [
+		{ path: 'stuff', kind: 'folder' },
+		{ path: 'stuff/react', kind: 'folder' },
+		{ path: 'stuff/react/React.md', kind: 'file', size: 120 },
+	]);
+
+	assert.deepEqual(
+		plan.actions.find((action) => action.folderPath === 'stuff/react'),
+		{
+			folderPath: 'stuff/react',
+			depth: 1,
+			kind: 'adopt-same-name',
+			sourcePath: 'stuff/react/React.md',
+			targetPath: 'stuff/react/react.md',
+		},
+	);
+});
+
 void test('blocks paths that cannot become Markdown folder notes', () => {
 	const plan = buildMigrationPlan('logs', 1, [
 		{ path: 'logs', kind: 'folder' },

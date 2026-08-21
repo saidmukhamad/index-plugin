@@ -437,7 +437,23 @@ export class IndexManager {
 
 		try {
 			for (const action of actions) {
-				if (action.kind === 'move-sidecar-and-adopt') {
+				if (
+					action.kind === 'adopt-same-name' &&
+					action.sourcePath !== action.targetPath
+				) {
+					const source = action.sourcePath
+						? this.plugin.app.vault.getFileByPath(action.sourcePath)
+						: null;
+					if (!source) {
+						throw new Error(`Could not find folder note “${action.sourcePath}”.`);
+					}
+					const conflict =
+						this.plugin.app.vault.getAbstractFileByPath(action.targetPath);
+					if (conflict && conflict !== source) {
+						throw new Error(`“${action.targetPath}” appeared during migration.`);
+					}
+					await this.plugin.app.fileManager.renameFile(source, action.targetPath);
+				} else if (action.kind === 'move-sidecar-and-adopt') {
 					const source = action.sourcePath
 						? this.plugin.app.vault.getFileByPath(action.sourcePath)
 						: null;

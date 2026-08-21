@@ -239,7 +239,15 @@ async function applyPlan(options, plan) {
 
 	for (const action of actions) {
 		const targetPath = toFilesystemPath(options.vault, action.targetPath);
-		if (action.kind === 'move-sidecar-and-adopt') {
+		if (
+			action.kind === 'adopt-same-name' &&
+			action.sourcePath !== action.targetPath
+		) {
+			await rename(
+				toFilesystemPath(options.vault, action.sourcePath),
+				targetPath,
+			);
+		} else if (action.kind === 'move-sidecar-and-adopt') {
 			await rename(
 				toFilesystemPath(options.vault, action.sourcePath),
 				targetPath,

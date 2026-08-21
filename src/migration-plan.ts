@@ -76,6 +76,21 @@ export function buildMigrationPlan(
 	const byPath = new Map(
 		entries.map((entry) => [normalizePath(entry.path), entry] as const),
 	);
+	const byCaseFoldedPath = new Map<string, MigrationEntryDescriptor[]>();
+	for (const entry of entries) {
+		const path = normalizePath(entry.path).toLowerCase();
+		const matches = byCaseFoldedPath.get(path) ?? [];
+		matches.push(entry);
+		byCaseFoldedPath.set(path, matches);
+	}
+	const findEntry = (path: string): MigrationEntryDescriptor | undefined => {
+		const exact = byPath.get(path);
+		if (exact) return exact;
+		const caseInsensitiveMatches = byCaseFoldedPath.get(path.toLowerCase());
+		return caseInsensitiveMatches?.length === 1
+			? caseInsensitiveMatches[0]
+			: undefined;
+	};
 	const folders = entries
 		.filter((entry) => entry.kind === 'folder')
 		.map((entry) => normalizePath(entry.path))
@@ -100,9 +115,9 @@ export function buildMigrationPlan(
 		const targetPath = joinPath(folder.path, `${folderName}.md`);
 		const legacyPath = joinPath(folder.path, 'index.md');
 		const sidecarPath = joinPath(getParent(folder.path), `${folderName}.md`);
-		const target = byPath.get(targetPath);
-		const legacy = legacyPath === targetPath ? undefined : byPath.get(legacyPath);
-		const sidecar = folder.depth === 0 ? undefined : byPath.get(sidecarPath);
+		const target = findEntry(targetPath);
+		const legacy = legacyPath === targetPath ? undefined : findEntry(legacyPath);
+		const sidecar = folder.depth === 0 ? undefined : findEntry(sidecarPath);
 
 		if (target?.kind === 'folder') {
 			blockers.push({
@@ -135,7 +150,7 @@ export function buildMigrationPlan(
 				folderPath: folder.path,
 				depth: folder.depth,
 				kind: 'adopt-same-name',
-				sourcePath: targetPath,
+				sourcePath: normalizePath(target.path),
 				targetPath,
 			};
 		} else if (legacy?.kind === 'file') {
@@ -143,7 +158,7 @@ export function buildMigrationPlan(
 				folderPath: folder.path,
 				depth: folder.depth,
 				kind: 'adopt-legacy-index',
-				sourcePath: legacyPath,
+				sourcePath: normalizePath(legacy.path),
 				targetPath,
 			};
 		} else if (sidecar?.kind === 'file') {
@@ -151,7 +166,7 @@ export function buildMigrationPlan(
 				folderPath: folder.path,
 				depth: folder.depth,
 				kind: 'move-sidecar-and-adopt',
-				sourcePath: sidecarPath,
+				sourcePath: normalizePath(sidecar.path),
 				targetPath,
 			};
 		} else {
@@ -167,7 +182,7 @@ export function buildMigrationPlan(
 		if (sidecar?.kind === 'file' && action.kind !== 'move-sidecar-and-adopt') {
 			duplicates.push({
 				folderPath: folder.path,
-				path: sidecarPath,
+				path: normalizePath(sidecar.path),
 				size: sidecar.size ?? 0,
 				reason: 'sidecar',
 			});
@@ -175,7 +190,7 @@ export function buildMigrationPlan(
 		if (legacy?.kind === 'file' && action.kind !== 'adopt-legacy-index') {
 			duplicates.push({
 				folderPath: folder.path,
-				path: legacyPath,
+				path: normalizePath(legacy.path),
 				size: legacy.size ?? 0,
 				reason: 'legacy-index',
 			});
