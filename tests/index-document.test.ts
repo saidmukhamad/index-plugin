@@ -6,7 +6,9 @@ import {
 	EMPTY_CHILDREN_MESSAGE,
 	InvalidManagedBlockError,
 	PAGES_CALLOUT,
+	buildManagedBlock,
 	buildNewIndexDocument,
+	getManagedBlockRange,
 	removeManagedBlock,
 	replaceManagedBlock,
 } from '../src/index-document.ts';
@@ -57,6 +59,17 @@ void test('formats an empty index as a readable section', () => {
 		result,
 		`${CHILDREN_START}\n${PAGES_CALLOUT}\n>\n> ${EMPTY_CHILDREN_MESSAGE}\n${CHILDREN_END}\n`,
 	);
+});
+
+void test('locates the generated section so editor selection can exclude it', () => {
+	const userContent = '# Journal\n\nSomething I wrote.\n\n';
+	const managedBlock = buildManagedBlock(['- [[reading]]']);
+	const document = `${userContent}${managedBlock}\n`;
+
+	assert.deepEqual(getManagedBlockRange(document), [
+		userContent.length,
+		userContent.length + managedBlock.length,
+	]);
 });
 
 void test('removes only the managed block when retiring an old generated index', () => {

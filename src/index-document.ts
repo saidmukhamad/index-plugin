@@ -15,7 +15,7 @@ export class InvalidManagedBlockError extends Error {
 	}
 }
 
-function getManagedBlockRange(document: string): [number, number] | null {
+export function getManagedBlockRange(document: string): [number, number] | null {
 	const start = document.indexOf(CHILDREN_START);
 	const end = document.indexOf(CHILDREN_END);
 	const hasDuplicateStart = start !== document.lastIndexOf(CHILDREN_START);

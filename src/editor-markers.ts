@@ -1,7 +1,13 @@
-import type { Extension, Range } from '@codemirror/state';
+import {
+	EditorSelection,
+	Prec,
+	type Extension,
+	type Range,
+} from '@codemirror/state';
 import {
 	Decoration,
 	ViewPlugin,
+	keymap,
 	type DecorationSet,
 	type EditorView,
 	type ViewUpdate,
@@ -13,6 +19,7 @@ import {
 	INDEX_ID_KEY,
 	INDEX_OWNER_KEY,
 	INDEX_OWNER_VALUE,
+	getManagedBlockRange,
 } from './index-document';
 
 const hiddenMarkerLine = Decoration.line({
@@ -110,4 +117,32 @@ const markerViewPlugin = ViewPlugin.fromClass(
 	},
 );
 
-export const hideManagedMarkersExtension: Extension = markerViewPlugin;
+function selectUserContent(view: EditorView): boolean {
+	let managedRange: [number, number] | null;
+	try {
+		managedRange = getManagedBlockRange(view.state.doc.toString());
+	} catch {
+		return false;
+	}
+	if (!managedRange) return false;
+
+	view.dispatch({
+		selection: EditorSelection.single(0, managedRange[0]),
+		scrollIntoView: true,
+	});
+	return true;
+}
+
+const selectUserContentKeymap = Prec.highest(
+	keymap.of([
+		{
+			key: 'Mod-a',
+			run: selectUserContent,
+		},
+	]),
+);
+
+export const hideManagedMarkersExtension: Extension = [
+	markerViewPlugin,
+	selectUserContentKeymap,
+];

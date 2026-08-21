@@ -15,6 +15,7 @@ import type { IndexManager } from './index-manager';
 const OWNED_INDEX_CLASS = 'index-plugin-owned-index';
 const INDEXED_FOLDER_CLASS = 'index-plugin-indexed-folder';
 const INDEX_VIEW_CLASS = 'index-plugin-index-view';
+const INDEX_CHILD_VIEW_CLASS = 'index-plugin-index-child-view';
 const HIDE_PROPERTIES_CLASS = 'index-plugin-hide-properties';
 const MANAGED_ALIAS_CLASS = 'index-plugin-managed-alias';
 const INTERNAL_PROPERTIES_CONTAINER_CLASS =
@@ -121,6 +122,9 @@ export class ExplorerIntegration {
 				);
 		});
 		activeDocument
+			.querySelectorAll(`.${INDEX_CHILD_VIEW_CLASS}`)
+			.forEach((element) => element.classList.remove(INDEX_CHILD_VIEW_CLASS));
+		activeDocument
 			.querySelectorAll(`.${INTERNAL_PROPERTIES_STATUS_CLASS}`)
 			.forEach((element) =>
 				element.classList.remove(INTERNAL_PROPERTIES_STATUS_CLASS),
@@ -132,7 +136,16 @@ export class ExplorerIntegration {
 			const view = leaf.view;
 			if (!(view instanceof MarkdownView)) return;
 			const owned = this.manager.isOwnedIndex(view.file);
+			const indexedChild =
+				!owned &&
+				view.file?.parent !== undefined &&
+				view.file.parent !== null &&
+				this.manager.getIndex(view.file.parent) !== null;
 			view.containerEl.classList.toggle(INDEX_VIEW_CLASS, owned);
+			view.containerEl.classList.toggle(
+				INDEX_CHILD_VIEW_CLASS,
+				indexedChild,
+			);
 			if (!owned || !view.file?.parent) {
 				view.containerEl.classList.remove(HIDE_PROPERTIES_CLASS);
 				view.containerEl.classList.remove(MANAGED_ALIAS_CLASS);
