@@ -15,7 +15,8 @@ import {
 	removeManagedBlock,
 	replaceManagedBlock,
 } from './index-document';
-import { getFolderIndexFilename, getFolderIndexPath } from './index-path';
+import { FolderWorkQueue } from './folder-work-queue';
+import { getFolderIndexFilename, getFolderIndexPath, isTemporaryFolderIndex } from './index-path';
 import {
 	buildMigrationPlan,
 	getMigrationDepth,
@@ -32,6 +33,8 @@ import {
 
 const SYNC_DELAY_MS = 120;
 const AUTO_INDEX_DELAY_MS = 750;
+const RENAME_SETTLE_DELAY_MS = 750;
+const MAX_MISSING_FILE_RETRIES = 2;
 
 export interface MigrationApplyResult {
 	backupPath: string;
@@ -62,10 +65,13 @@ export class IndexManager {
 	private readonly ensuringIndexes = new Map<string, Promise<TFile>>();
 	private readonly aligningIndexes = new Map<string, Promise<TFile | null>>();
 	private readonly refreshingOwnership = new Map<string, Promise<void>>();
-	private readonly pendingFolderSyncs = new Set<string>();
+	private readonly folderWork: FolderWorkQueue;
+	private readonly pendingOwnershipRefreshes = new Set<string>();
+	private readonly missingFileRetries = new Map<string, number>();
+	private readonly failedFolderSyncs = new Map<string, string>();
+	private syncFailureNotice: Notice | null = null;
 	private readonly pendingFolderInitializations = new Map<string, number>();
 	private readonly ownedIndexListeners = new Set<() => void>();
-	private syncTimer: number | null = null;
 	private migrationInProgress = false;
 	private activeMigrationScope: { rootPath: string; maxDepth: number } | null = null;
 	private disposed = false;
@@ -73,11 +79,14 @@ export class IndexManager {
 	constructor(
 		private readonly plugin: Plugin,
 		private readonly getSettings: () => IndexPluginSettings,
-	) {}
+	) {
+		this.folderWork = new FolderWorkQueue((path) => this.updateFolder(path));
+	}
 
 	start(): void {
 		this.disposed = false;
 		this.plugin.app.workspace.onLayoutReady(() => {
+			if (this.disposed) return;
 			this.refreshOwnedIndexPaths();
 
 			this.plugin.registerEvent(
@@ -118,14 +127,7 @@ export class IndexManager {
 								cache.frontmatter?.[INDEX_FOLDER_NAME_KEY] !== folder.name ||
 								this.hasManagedFolderAlias(cache.frontmatter, folder.name))
 						) {
-							void this.refreshOwnershipMetadata(folder).catch(
-								(error: unknown) => {
-									console.error(
-										`Could not keep folder note ${file.path} synchronized.`,
-										error,
-									);
-								},
-							);
+							this.scheduleOwnershipRefresh(folder);
 						}
 					}
 					if (changed) {
@@ -141,11 +143,12 @@ export class IndexManager {
 
 	dispose(): void {
 		this.disposed = true;
-		if (this.syncTimer !== null) {
-			window.clearTimeout(this.syncTimer);
-			this.syncTimer = null;
-		}
-		this.pendingFolderSyncs.clear();
+		this.folderWork.dispose();
+		this.pendingOwnershipRefreshes.clear();
+		this.missingFileRetries.clear();
+		this.failedFolderSyncs.clear();
+		this.syncFailureNotice?.hide();
+		this.syncFailureNotice = null;
 		for (const timer of this.pendingFolderInitializations.values()) {
 			window.clearTimeout(timer);
 		}
@@ -695,12 +698,7 @@ export class IndexManager {
 				this.hasManagedFolderAlias(frontmatter, folder.name);
 			if (!needsRefresh) continue;
 
-			void this.refreshOwnershipMetadata(folder).catch((error: unknown) => {
-				console.error(`Could not migrate folder note ${file.path}.`, error);
-				new Notice(
-					`Could not rename the folder note for “${folder.name}”. Check for a conflicting file.`,
-				);
-			});
+			this.scheduleOwnershipRefresh(folder);
 		}
 	}
 
@@ -835,7 +833,7 @@ export class IndexManager {
 			this.plugin.app.metadataCache.getFileCache(currentIndex)?.frontmatter;
 		const rawIndexId: unknown = frontmatter?.[INDEX_ID_KEY];
 		const index = await this.alignOwnedIndexName(folder, currentIndex);
-		if (!index) return;
+		if (!index || this.disposed) return;
 		await this.writeOwnershipMetadata(
 			index,
 			folder,
@@ -866,7 +864,7 @@ export class IndexManager {
 		candidate?: TFile,
 	): Promise<TFile | null> {
 		const index = candidate ?? this.getIndex(folder);
-		if (!index) return null;
+		if (!index || this.disposed || isTemporaryFolderIndex(index.name, folder.name)) return null;
 
 		const expectedPath = this.getExpectedIndexPath(folder);
 		if (index.path === expectedPath) return index;
@@ -897,39 +895,80 @@ export class IndexManager {
 	}
 
 	private scheduleFolderSync(folderPath: string): void {
-		if (!folderPath) return;
-		this.pendingFolderSyncs.add(folderPath);
-		if (this.syncTimer !== null) return;
-
-		this.syncTimer = window.setTimeout(() => {
-			this.syncTimer = null;
-			void this.flushFolderSyncs();
-		}, SYNC_DELAY_MS);
+		this.folderWork.schedule(folderPath, SYNC_DELAY_MS);
 	}
 
-	private async flushFolderSyncs(): Promise<void> {
-		const folderPaths = [...this.pendingFolderSyncs];
-		this.pendingFolderSyncs.clear();
+	private scheduleOwnershipRefresh(folder: TFolder): void {
+		if (this.disposed) return;
+		this.pendingOwnershipRefreshes.add(folder.path);
+		this.folderWork.schedule(folder.path, RENAME_SETTLE_DELAY_MS);
+		// Parent links must also wait until the child's final name is available.
+		this.folderWork.schedule(folder.parent?.path ?? '', RENAME_SETTLE_DELAY_MS);
+	}
 
-		for (const folderPath of folderPaths) {
-			const folder = this.plugin.app.vault.getFolderByPath(folderPath);
-			if (!folder || folder.isRoot()) continue;
-			try {
-				await this.syncFolder(folder);
-			} catch (error) {
-				console.error(`Could not synchronize ${folder.path}.`, error);
-				new Notice('Could not update a folder index. Check the developer console.');
+	private async updateFolder(folderPath: string): Promise<void> {
+		if (this.disposed) return;
+		const folder = this.plugin.app.vault.getFolderByPath(folderPath);
+		if (!folder || folder.isRoot()) {
+			this.pendingOwnershipRefreshes.delete(folderPath);
+			this.clearSyncFailure(folderPath);
+			return;
+		}
+		const index = this.getIndex(folder);
+		// Never take over another plugin's intermediate rename. The final rename
+		// event will schedule this folder again, even if the operation takes seconds.
+		if (index && isTemporaryFolderIndex(index.name, folder.name)) return;
+
+		try {
+			if (this.pendingOwnershipRefreshes.delete(folderPath)) {
+				await this.refreshOwnershipMetadata(folder);
 			}
+			if (this.disposed) return;
+			await this.syncFolder(folder);
+			this.clearSyncFailure(folderPath);
+		} catch (error) {
+			if (this.disposed) return;
+			this.pendingOwnershipRefreshes.add(folderPath);
+			const retries = this.missingFileRetries.get(folderPath) ?? 0;
+			if (
+				typeof error === 'object' && error !== null &&
+				'code' in error && error.code === 'ENOENT' &&
+				retries < MAX_MISSING_FILE_RETRIES
+			) {
+				this.missingFileRetries.set(folderPath, retries + 1);
+				this.folderWork.schedule(folderPath, RENAME_SETTLE_DELAY_MS);
+				return;
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			if (this.failedFolderSyncs.get(folderPath) !== message) {
+				console.error(`Could not synchronize ${folderPath}.`, error);
+			}
+			this.failedFolderSyncs.set(folderPath, message);
+			this.updateSyncFailureNotice();
 		}
+	}
 
-		if (this.pendingFolderSyncs.size > 0) {
-			this.scheduleFolderSync([...this.pendingFolderSyncs][0] ?? '');
+	private clearSyncFailure(folderPath: string): void {
+		this.missingFileRetries.delete(folderPath);
+		if (this.failedFolderSyncs.delete(folderPath)) this.updateSyncFailureNotice();
+	}
+
+	private updateSyncFailureNotice(): void {
+		const count = this.failedFolderSyncs.size;
+		if (count === 0) {
+			this.syncFailureNotice?.hide();
+			this.syncFailureNotice = null;
+			return;
 		}
+		const message = `Could not update ${count} folder ${count === 1 ? 'index' : 'indexes'}. Check the developer console.`;
+		if (this.syncFailureNotice) this.syncFailureNotice.setMessage(message);
+		else this.syncFailureNotice = new Notice(message, 0);
 	}
 
 	private async syncFolder(folder: TFolder): Promise<void> {
 		const index = this.getIndex(folder);
-		if (!index) return;
+		if (!index || this.disposed || isTemporaryFolderIndex(index.name, folder.name)) return;
+		const indexPath = index.path;
 		const children = [...folder.children]
 			.filter((child) => !this.isOwnedIndex(child))
 			.sort((left, right) => {
@@ -950,6 +989,7 @@ export class IndexManager {
 					if (!this.shouldIndexFolder(child.path)) continue;
 					childIndex = await this.ensureIndex(child);
 				}
+				if (isTemporaryFolderIndex(childIndex.name, child.name)) return;
 				const link = this.plugin.app.fileManager.generateMarkdownLink(
 					childIndex,
 					index.path,
@@ -969,6 +1009,11 @@ export class IndexManager {
 			}
 		}
 
+		if (this.disposed) return;
+		if (index.path !== indexPath) {
+			this.scheduleOwnershipRefresh(folder);
+			return;
+		}
 		await this.plugin.app.vault.process(index, (document) =>
 			replaceManagedBlock(document, entries),
 		);
@@ -1067,14 +1112,7 @@ export class IndexManager {
 				this.ownedIndexPaths.add(file.path);
 				this.emitOwnedIndexesChanged();
 				if (file.parent && !file.parent.isRoot()) {
-					try {
-						await this.refreshOwnershipMetadata(file.parent);
-					} catch (error) {
-						console.error(`Could not align folder note ${file.path}.`, error);
-						new Notice(
-							'Could not keep a folder note name synchronized. Check for a conflicting file.',
-						);
-					}
+					this.scheduleOwnershipRefresh(file.parent);
 				}
 			}
 			return;
@@ -1113,8 +1151,7 @@ export class IndexManager {
 					folder.path === file.path || folder.path.startsWith(`${file.path}/`),
 			);
 		for (const folder of folders) {
-			await this.refreshOwnershipMetadata(folder);
-			this.scheduleFolderSync(folder.path);
+			this.scheduleOwnershipRefresh(folder);
 		}
 	}
 
