@@ -72,13 +72,15 @@ export class IndexManager {
 	private syncFailureNotice: Notice | null = null;
 	private readonly pendingFolderInitializations = new Map<string, number>();
 	private readonly ownedIndexListeners = new Set<() => void>();
-	private migrationInProgress = false;
 	private activeMigrationScope: { rootPath: string; maxDepth: number } | null = null;
 	private disposed = false;
 
 	constructor(
 		private readonly plugin: Plugin,
 		private readonly getSettings: () => IndexPluginSettings,
+		private readonly updateSettings: (
+			update: (settings: IndexPluginSettings) => IndexPluginSettings,
+		) => Promise<void>,
 	) {
 		this.folderWork = new FolderWorkQueue((path) => this.updateFolder(path));
 	}
@@ -144,6 +146,9 @@ export class IndexManager {
 	dispose(): void {
 		this.disposed = true;
 		this.folderWork.dispose();
+		this.ensuringIndexes.clear();
+		this.pendingIndexCreates.clear();
+		this.suppressedFolderCreates.clear();
 		this.pendingOwnershipRefreshes.clear();
 		this.missingFileRetries.clear();
 		this.failedFolderSyncs.clear();
@@ -198,20 +203,15 @@ export class IndexManager {
 			throw new Error(`“${folderName}” already exists in this location.`);
 		}
 
-		const settings = this.getSettings();
-		settings.plainFolders = [
-			...settings.plainFolders.filter((path) => path !== folderPath),
+		await this.updatePlainFolders((paths) => [
+			...paths.filter((path) => path !== folderPath),
 			folderPath,
-		];
-		await this.plugin.saveData(settings);
+		]);
 		this.suppressedFolderCreates.add(folderPath);
 		try {
 			return await this.plugin.app.vault.createFolder(folderPath);
 		} catch (error) {
-			settings.plainFolders = settings.plainFolders.filter(
-				(path) => path !== folderPath,
-			);
-			await this.plugin.saveData(settings);
+			await this.stopTreatingAsPlain(folderPath);
 			throw error;
 		} finally {
 			this.suppressedFolderCreates.delete(folderPath);
@@ -432,7 +432,6 @@ export class IndexManager {
 				: right.depth - left.depth,
 		);
 		let completed = 0;
-		this.migrationInProgress = true;
 		this.activeMigrationScope = {
 			rootPath: plan.rootPath,
 			maxDepth: plan.maxDepth,
@@ -476,7 +475,6 @@ export class IndexManager {
 				onProgress?.(completed, actions.length, action.folderPath);
 			}
 		} finally {
-			this.migrationInProgress = false;
 			this.activeMigrationScope = null;
 		}
 
@@ -1053,7 +1051,7 @@ export class IndexManager {
 	private scheduleFolderInitialization(folder: TFolder): void {
 		if (
 			this.disposed ||
-			this.migrationInProgress ||
+			this.activeMigrationScope ||
 			!shouldAutoIndexFolder(this.getSettings(), folder.path)
 		) {
 			return;
@@ -1079,7 +1077,7 @@ export class IndexManager {
 	}
 
 	private async initializeManagedFolder(folderPath: string): Promise<void> {
-		if (this.disposed || this.migrationInProgress) return;
+		if (this.disposed || this.activeMigrationScope) return;
 		const folder = this.plugin.app.vault.getFolderByPath(folderPath);
 		if (!folder || !shouldAutoIndexFolder(this.getSettings(), folder.path)) return;
 
@@ -1118,23 +1116,16 @@ export class IndexManager {
 			return;
 		}
 
-		const settings = this.getSettings();
 		const oldPrefix = `${oldPath}/`;
-		const renamedPlainFolders = settings.plainFolders.map((path) =>
-			path === oldPath
-				? file.path
-				: path.startsWith(oldPrefix)
-					? `${file.path}/${path.slice(oldPrefix.length)}`
-					: path,
+		await this.updatePlainFolders((paths) =>
+			paths.map((path) =>
+				path === oldPath
+					? file.path
+					: path.startsWith(oldPrefix)
+						? `${file.path}/${path.slice(oldPrefix.length)}`
+						: path,
+			),
 		);
-		if (
-			renamedPlainFolders.some(
-				(path, index) => path !== settings.plainFolders[index],
-			)
-		) {
-			settings.plainFolders = renamedPlainFolders;
-			await this.plugin.saveData(settings);
-		}
 
 		const newPrefix = `${file.path}/`;
 		for (const ownedPath of [...this.ownedIndexPaths]) {
@@ -1158,14 +1149,9 @@ export class IndexManager {
 	private handleDelete(file: TAbstractFile): void {
 		if (file instanceof TFolder) {
 			const prefix = `${file.path}/`;
-			const settings = this.getSettings();
-			const remainingPlainFolders = settings.plainFolders.filter(
-				(path) => path !== file.path && !path.startsWith(prefix),
+			void this.updatePlainFolders((paths) =>
+				paths.filter((path) => path !== file.path && !path.startsWith(prefix)),
 			);
-			if (remainingPlainFolders.length !== settings.plainFolders.length) {
-				settings.plainFolders = remainingPlainFolders;
-				void this.plugin.saveData(settings);
-			}
 			for (const ownedPath of [...this.ownedIndexPaths]) {
 				if (ownedPath.startsWith(prefix)) this.ownedIndexPaths.delete(ownedPath);
 			}
@@ -1177,11 +1163,21 @@ export class IndexManager {
 	}
 
 	private async stopTreatingAsPlain(folderPath: string): Promise<void> {
-		const settings = this.getSettings();
-		if (!settings.plainFolders.includes(folderPath)) return;
-		settings.plainFolders = settings.plainFolders.filter(
-			(path) => path !== folderPath,
+		await this.updatePlainFolders((paths) =>
+			paths.filter((path) => path !== folderPath),
 		);
-		await this.plugin.saveData(settings);
+	}
+
+	/** Settings belong to the plugin; unchanged lists keep the same object so nothing is saved. */
+	private async updatePlainFolders(
+		update: (paths: readonly string[]) => string[],
+	): Promise<void> {
+		await this.updateSettings((settings) => {
+			const plainFolders = update(settings.plainFolders);
+			const unchanged =
+				plainFolders.length === settings.plainFolders.length &&
+				plainFolders.every((path, index) => path === settings.plainFolders[index]);
+			return unchanged ? settings : { ...settings, plainFolders };
+		});
 	}
 }

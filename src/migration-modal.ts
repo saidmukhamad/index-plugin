@@ -1,12 +1,11 @@
 import { App, Modal, Notice, Setting, TFolder } from 'obsidian';
-import type { IndexManager, MigrationApplyResult } from './index-manager';
+import type { IndexManager } from './index-manager';
 import { countMigrationActions, type MigrationPlan } from './migration-plan';
 
 interface MigrationModalOptions {
 	manager: IndexManager;
 	root: TFolder;
 	onBeforeApply: (maxDepth: number) => Promise<void>;
-	onApplied?: (result: MigrationApplyResult) => Promise<void>;
 }
 
 export class MigrationModal extends Modal {
@@ -149,7 +148,6 @@ export class MigrationModal extends Modal {
 					progress.setText(`${completed}/${total}: ${folderPath}`);
 				},
 			);
-			await this.options.onApplied?.(result);
 			new Notice(
 				`Migrated ${result.convertedFolderCount} folders. Backup: ${result.backupPath}`,
 				10_000,

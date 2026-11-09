@@ -1,42 +1,51 @@
 import { App, Modal, Setting } from 'obsidian';
-import { normalizeNoteName } from './note-name';
 
-export class NoteNameModal extends Modal {
+export interface NameModalOptions {
+	title: string;
+	label: string;
+	description: string;
+	/** Returns the validated name or throws an error whose message is shown to the user. */
+	normalize: (value: string) => string;
+}
+
+export class NameModal extends Modal {
 	private resolveResult: ((value: string | null) => void) | null = null;
 	private submittedName: string | null = null;
 
-	static prompt(app: App): Promise<string | null> {
-		let resolveResult: (value: string | null) => void = () => undefined;
-		const result = new Promise<string | null>((resolve) => {
-			resolveResult = resolve;
+	private constructor(
+		app: App,
+		private readonly options: NameModalOptions,
+	) {
+		super(app);
+	}
+
+	static prompt(app: App, options: NameModalOptions): Promise<string | null> {
+		return new Promise((resolve) => {
+			const modal = new NameModal(app, options);
+			modal.resolveResult = resolve;
+			modal.open();
 		});
-		const modal = new NoteNameModal(app);
-		modal.resolveResult = resolveResult;
-		modal.open();
-		return result;
 	}
 
 	onOpen(): void {
-		this.setTitle('Create new (indexed)');
+		this.setTitle(this.options.title);
 		const errorEl = this.contentEl.createDiv({ cls: 'index-plugin-name-error' });
 		let input: HTMLInputElement | null = null;
 		const submit = (): void => {
 			try {
-				this.submittedName = normalizeNoteName(input?.value ?? '');
+				this.submittedName = this.options.normalize(input?.value ?? '');
 				this.close();
 			} catch (error) {
-				errorEl.setText(error instanceof Error ? error.message : 'Invalid note name.');
+				errorEl.setText(error instanceof Error ? error.message : 'Invalid name.');
 			}
 		};
 
 		new Setting(this.contentEl)
-			.setName('Note name')
-			.setDesc('Creates a child note and links it from the folder index.')
+			.setName(this.options.label)
+			.setDesc(this.options.description)
 			.addText((text) => {
 				input = text.inputEl;
-				text.setPlaceholder('Untitled').onChange(() => {
-					errorEl.empty();
-				});
+				text.setPlaceholder('Untitled').onChange(() => errorEl.empty());
 				text.inputEl.addEventListener('keydown', (event) => {
 					if (event.key !== 'Enter') return;
 					event.preventDefault();

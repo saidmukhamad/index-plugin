@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { buildSync } from 'esbuild';
 import type { Plugin } from 'obsidian';
 import type { IndexManager } from '../src/index-manager.ts';
+import type { IndexPluginSettings } from '../src/settings.ts';
 
 // Exercise the actual manager with Obsidian events and a deterministic clock.
 const bundle = buildSync({
@@ -52,7 +53,7 @@ class Events {
 	}
 }
 
-function harness(filename = 'Projects.md') {
+function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 	let now = 1000;
 	let nextTimer = 0;
 	const timers = new Map<number, { due: number; run: () => void }>();
@@ -141,13 +142,30 @@ function harness(filename = 'Projects.md') {
 			clearTimeout: (id: number) => { timers.delete(id); },
 		},
 	});
-	const manager = new module.exports.IndexManager(plugin as unknown as Plugin, () => ({
-		autoIndexNewFolders: false, managedRoots: [], plainFolders: [],
-	}));
+	let settings: IndexPluginSettings = { autoIndexNewFolders: false, managedRoots: [], plainFolders };
+	let settingsSaves = 0;
+	const manager = new module.exports.IndexManager(
+		plugin as unknown as Plugin,
+		() => settings,
+		async (update) => {
+			const next = update(settings);
+			if (next !== settings) settingsSaves++;
+			settings = next;
+		},
+	);
 	manager.start();
 	return {
 		manager, index, folder, writes, renames, notices, errors,
 		get frontmatterWrites() { return frontmatterWrites; },
+		get settings() { return settings; },
+		get settingsSaves() { return settingsSaves; },
+		renameFolder: (newPath: string) => {
+			const oldPath = folder.path;
+			folder.path = newPath;
+			folder.name = newPath.split('/').at(-1) ?? '';
+			for (const child of folder.children) child.path = `${newPath}/${child.path.slice(oldPath.length + 1)}`;
+			events.emit('rename', folder, oldPath);
+		},
 		setProcessHook(hook?: () => Promise<void>) { processHook = hook; },
 		rename: (path: string) => { rename(index, path); },
 		metadataChanged: () => { metadata.emit('changed', index, '', caches.get(index)); },
@@ -291,4 +309,23 @@ void test('does not resume queued work or show errors after unloading during a w
 	assert.equal(h.writes.length, 1);
 	assert.deepEqual(h.notices, []);
 	assert.deepEqual(h.errors, []);
+});
+
+void test('moves plain-folder settings with renamed folders without touching the previous settings object', async () => {
+	const h = harness('Projects.md', ['Projects/Assets', 'Elsewhere']);
+	const before = h.settings;
+	h.renameFolder('Work');
+	await h.advance(0);
+	assert.deepEqual(h.settings.plainFolders, ['Work/Assets', 'Elsewhere']);
+	assert.deepEqual(before.plainFolders, ['Projects/Assets', 'Elsewhere']);
+	assert.equal(h.settingsSaves, 1);
+	h.unload();
+});
+
+void test('does not save settings when a rename leaves plain folders unchanged', async () => {
+	const h = harness('Projects.md', ['Elsewhere']);
+	h.renameFolder('Work');
+	await h.advance(0);
+	assert.equal(h.settingsSaves, 0);
+	h.unload();
 });
