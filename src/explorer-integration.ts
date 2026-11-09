@@ -101,20 +101,13 @@ export class ExplorerIntegration {
 		this.observer = null;
 		this.removeIndexListener?.();
 		this.removeIndexListener = null;
+		this.plugin.app.workspace.iterateAllLeaves((leaf) => {
+			if (leaf.view instanceof MarkdownView) this.restoreFileTitle(leaf.view);
+		});
 		activeDocument.querySelectorAll(`.${INDEX_VIEW_CLASS}`).forEach((element) => {
 			element.classList.remove(INDEX_VIEW_CLASS);
 			element.classList.remove(HIDE_PROPERTIES_CLASS);
 			element.classList.remove(MANAGED_ALIAS_CLASS);
-			element
-				.querySelectorAll<HTMLElement>(
-					'.inline-title[data-index-plugin-folder-title]',
-				)
-				.forEach((title) => {
-					title.setText(title.dataset.indexPluginOriginalTitle ?? 'index');
-					delete title.dataset.indexPluginFolderTitle;
-					delete title.dataset.indexPluginOriginalTitle;
-					delete title.dataset.folderPath;
-				});
 			element
 				.querySelectorAll(`.${INTERNAL_PROPERTIES_CONTAINER_CLASS}`)
 				.forEach((container) =>
@@ -149,16 +142,7 @@ export class ExplorerIntegration {
 			if (!owned || !view.file?.parent) {
 				view.containerEl.classList.remove(HIDE_PROPERTIES_CLASS);
 				view.containerEl.classList.remove(MANAGED_ALIAS_CLASS);
-				view.containerEl
-					.querySelectorAll<HTMLElement>(
-						'.inline-title[data-index-plugin-folder-title]',
-					)
-					.forEach((title) => {
-						title.setText(title.dataset.indexPluginOriginalTitle ?? view.file?.basename ?? '');
-						delete title.dataset.indexPluginFolderTitle;
-						delete title.dataset.indexPluginOriginalTitle;
-						delete title.dataset.folderPath;
-					});
+				this.restoreFileTitle(view);
 				view.containerEl
 					.querySelectorAll(`.${INTERNAL_PROPERTIES_CONTAINER_CLASS}`)
 					.forEach((container) =>
@@ -171,6 +155,17 @@ export class ExplorerIntegration {
 			this.refreshPropertyVisibility(view);
 		});
 		this.refreshPropertiesStatus();
+	}
+
+	/** The view may now show a different file, so restore that file's name rather than a cached title. */
+	private restoreFileTitle(view: MarkdownView): void {
+		view.containerEl
+			.querySelectorAll<HTMLElement>('.inline-title[data-index-plugin-folder-title]')
+			.forEach((title) => {
+				title.setText(view.file?.basename ?? '');
+				delete title.dataset.indexPluginFolderTitle;
+				delete title.dataset.folderPath;
+			});
 	}
 
 	private refreshPropertiesStatus(): void {
@@ -194,7 +189,6 @@ export class ExplorerIntegration {
 		const inlineTitle =
 			view.containerEl.querySelector<HTMLElement>('.inline-title');
 		if (!inlineTitle) return;
-		inlineTitle.dataset.indexPluginOriginalTitle ??= inlineTitle.textContent ?? 'index';
 		inlineTitle.dataset.indexPluginFolderTitle = 'true';
 		inlineTitle.dataset.folderPath = folder.path;
 		inlineTitle.setAttribute('aria-label', 'Folder name');
