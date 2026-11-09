@@ -18,11 +18,16 @@ import {
 import { FolderWorkQueue } from './folder-work-queue';
 import { getFolderIndexFilename, getFolderIndexPath, isTemporaryFolderIndex } from './index-path';
 import {
+	applyMigrationPlan,
+	type MigrationApplyResult,
+	type MigrationHost,
+} from './migration/apply';
+import {
 	buildMigrationPlan,
 	getMigrationDepth,
 	type MigrationEntryDescriptor,
 	type MigrationPlan,
-} from './migration-plan';
+} from './migration/plan';
 import { normalizeFolderName, normalizeNoteName } from './note-name';
 import {
 	type IndexPluginSettings,
@@ -35,12 +40,6 @@ const SYNC_DELAY_MS = 120;
 const AUTO_INDEX_DELAY_MS = 750;
 const RENAME_SETTLE_DELAY_MS = 750;
 const MAX_MISSING_FILE_RETRIES = 2;
-
-export interface MigrationApplyResult {
-	backupPath: string;
-	convertedFolderCount: number;
-	trashedDuplicateCount: number;
-}
 
 function joinPath(parent: string, child: string): string {
 	return normalizePath(parent ? `${parent}/${child}` : child);
@@ -72,13 +71,15 @@ export class IndexManager {
 	private syncFailureNotice: Notice | null = null;
 	private readonly pendingFolderInitializations = new Map<string, number>();
 	private readonly ownedIndexListeners = new Set<() => void>();
-	private migrationInProgress = false;
 	private activeMigrationScope: { rootPath: string; maxDepth: number } | null = null;
 	private disposed = false;
 
 	constructor(
 		private readonly plugin: Plugin,
 		private readonly getSettings: () => IndexPluginSettings,
+		private readonly updateSettings: (
+			update: (settings: IndexPluginSettings) => IndexPluginSettings,
+		) => Promise<void>,
 	) {
 		this.folderWork = new FolderWorkQueue((path) => this.updateFolder(path));
 	}
@@ -144,6 +145,9 @@ export class IndexManager {
 	dispose(): void {
 		this.disposed = true;
 		this.folderWork.dispose();
+		this.ensuringIndexes.clear();
+		this.pendingIndexCreates.clear();
+		this.suppressedFolderCreates.clear();
 		this.pendingOwnershipRefreshes.clear();
 		this.missingFileRetries.clear();
 		this.failedFolderSyncs.clear();
@@ -198,20 +202,15 @@ export class IndexManager {
 			throw new Error(`“${folderName}” already exists in this location.`);
 		}
 
-		const settings = this.getSettings();
-		settings.plainFolders = [
-			...settings.plainFolders.filter((path) => path !== folderPath),
+		await this.updatePlainFolders((paths) => [
+			...paths.filter((path) => path !== folderPath),
 			folderPath,
-		];
-		await this.plugin.saveData(settings);
+		]);
 		this.suppressedFolderCreates.add(folderPath);
 		try {
 			return await this.plugin.app.vault.createFolder(folderPath);
 		} catch (error) {
-			settings.plainFolders = settings.plainFolders.filter(
-				(path) => path !== folderPath,
-			);
-			await this.plugin.saveData(settings);
+			await this.stopTreatingAsPlain(folderPath);
 			throw error;
 		} finally {
 			this.suppressedFolderCreates.delete(folderPath);
@@ -416,85 +415,58 @@ export class IndexManager {
 		trashEmptyDuplicates: boolean,
 		onProgress?: (completed: number, total: number, folderPath: string) => void,
 	): Promise<MigrationApplyResult> {
-		if (plan.blockers.length > 0) {
-			throw new Error('Resolve migration blockers before applying this plan.');
-		}
 		const root = this.plugin.app.vault.getFolderByPath(plan.rootPath);
 		if (!root) throw new Error(`Could not find “${plan.rootPath}”.`);
 		const currentPlan = this.createMigrationPlan(root, plan.maxDepth);
 		if (this.getMigrationSignature(plan) !== this.getMigrationSignature(currentPlan)) {
 			throw new Error('The folder tree changed. Review a fresh migration preview.');
 		}
-		const backupPath = await this.writeMigrationBackup(plan);
-		const actions = [...plan.actions].sort((left, right) =>
-			left.depth === right.depth
-				? left.folderPath.localeCompare(right.folderPath)
-				: right.depth - left.depth,
-		);
-		let completed = 0;
-		this.migrationInProgress = true;
-		this.activeMigrationScope = {
-			rootPath: plan.rootPath,
-			maxDepth: plan.maxDepth,
-		};
-
+		this.activeMigrationScope = { rootPath: plan.rootPath, maxDepth: plan.maxDepth };
 		try {
-			for (const action of actions) {
-				if (
-					action.kind === 'adopt-same-name' &&
-					action.sourcePath !== action.targetPath
-				) {
-					const source = action.sourcePath
-						? this.plugin.app.vault.getFileByPath(action.sourcePath)
-						: null;
-					if (!source) {
-						throw new Error(`Could not find folder note “${action.sourcePath}”.`);
-					}
-					const conflict =
-						this.plugin.app.vault.getAbstractFileByPath(action.targetPath);
-					if (conflict && conflict !== source) {
-						throw new Error(`“${action.targetPath}” appeared during migration.`);
-					}
-					await this.plugin.app.fileManager.renameFile(source, action.targetPath);
-				} else if (action.kind === 'move-sidecar-and-adopt') {
-					const source = action.sourcePath
-						? this.plugin.app.vault.getFileByPath(action.sourcePath)
-						: null;
-					if (!source) {
-						throw new Error(`Could not find sidecar note “${action.sourcePath}”.`);
-					}
-					if (this.plugin.app.vault.getAbstractFileByPath(action.targetPath)) {
-						throw new Error(`“${action.targetPath}” appeared during migration.`);
-					}
-					await this.plugin.app.fileManager.renameFile(source, action.targetPath);
-				}
-
-				const folder = this.plugin.app.vault.getFolderByPath(action.folderPath);
-				if (!folder) throw new Error(`Could not find “${action.folderPath}”.`);
-				await this.convertFolder(folder);
-				completed += 1;
-				onProgress?.(completed, actions.length, action.folderPath);
-			}
+			return await applyMigrationPlan(plan, this.createMigrationHost(), {
+				trashEmptyDuplicates,
+				onProgress,
+			});
 		} finally {
-			this.migrationInProgress = false;
 			this.activeMigrationScope = null;
 		}
+	}
 
-		let trashedDuplicateCount = 0;
-		if (trashEmptyDuplicates) {
-			for (const duplicate of plan.duplicates) {
-				if (duplicate.size !== 0) continue;
-				const file = this.plugin.app.vault.getFileByPath(duplicate.path);
-				if (!file || file.stat.size !== 0 || this.isOwnedIndex(file)) continue;
-				await this.plugin.app.fileManager.trashFile(file);
-				trashedDuplicateCount += 1;
-			}
-		}
-
+	private createMigrationHost(): MigrationHost {
+		const { vault, fileManager } = this.plugin.app;
 		return {
-			backupPath,
-			convertedFolderCount: completed,
-			trashedDuplicateCount,
+			findFile: async (path) => vault.getAbstractFileByPath(path),
+			readBackupFile: async (path) => {
+				const file = vault.getFileByPath(path);
+				if (!file) return null;
+				return { path, content: await vault.read(file), ctime: file.stat.ctime, mtime: file.stat.mtime };
+			},
+			writeBackup: async (fileName, manifest) => {
+				const pluginDirectory =
+					this.plugin.manifest.dir ??
+					`${vault.configDir}/plugins/${this.plugin.manifest.id}`;
+				const backupDirectory = normalizePath(`${pluginDirectory}/migration-backups`);
+				await this.ensureAdapterDirectory(backupDirectory);
+				const backupPath = normalizePath(`${backupDirectory}/${fileName}`);
+				await vault.adapter.write(backupPath, manifest);
+				return backupPath;
+			},
+			renameFile: async (sourcePath, targetPath) => {
+				const file = vault.getAbstractFileByPath(sourcePath);
+				if (!file) throw new Error(`Could not find “${sourcePath}”.`);
+				await fileManager.renameFile(file, targetPath);
+			},
+			adoptFolder: async (action) => {
+				const folder = vault.getFolderByPath(action.folderPath);
+				if (!folder) throw new Error(`Could not find “${action.folderPath}”.`);
+				await this.convertFolder(folder);
+			},
+			trashEmptyFile: async (path) => {
+				const file = vault.getFileByPath(path);
+				if (!file || file.stat.size !== 0 || this.isOwnedIndex(file)) return false;
+				await fileManager.trashFile(file);
+				return true;
+			},
 		};
 	}
 
@@ -515,48 +487,6 @@ export class IndexManager {
 				blocker.reason,
 			]),
 		});
-	}
-
-	private async writeMigrationBackup(plan: MigrationPlan): Promise<string> {
-		const filePaths = new Set<string>();
-		for (const action of plan.actions) {
-			if (action.sourcePath) filePaths.add(action.sourcePath);
-		}
-		for (const duplicate of plan.duplicates) filePaths.add(duplicate.path);
-		const files = [];
-		for (const path of filePaths) {
-			const file = this.plugin.app.vault.getFileByPath(path);
-			if (!file) continue;
-			files.push({
-				path: file.path,
-				content: await this.plugin.app.vault.read(file),
-				ctime: file.stat.ctime,
-				mtime: file.stat.mtime,
-			});
-		}
-		const pluginDirectory =
-			this.plugin.manifest.dir ??
-			`${this.plugin.app.vault.configDir}/plugins/${this.plugin.manifest.id}`;
-		const backupDirectory = normalizePath(`${pluginDirectory}/migration-backups`);
-		await this.ensureAdapterDirectory(backupDirectory);
-		const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-		const backupPath = normalizePath(
-			`${backupDirectory}/${timestamp}-${plan.rootPath.replace(/\//g, '-')}.json`,
-		);
-		await this.plugin.app.vault.adapter.write(
-			backupPath,
-			JSON.stringify(
-				{
-					version: 1,
-					createdAt: new Date().toISOString(),
-					plan,
-					files,
-				},
-				null,
-				2,
-			),
-		);
-		return backupPath;
 	}
 
 	private async ensureAdapterDirectory(path: string): Promise<void> {
@@ -1053,7 +983,7 @@ export class IndexManager {
 	private scheduleFolderInitialization(folder: TFolder): void {
 		if (
 			this.disposed ||
-			this.migrationInProgress ||
+			this.activeMigrationScope ||
 			!shouldAutoIndexFolder(this.getSettings(), folder.path)
 		) {
 			return;
@@ -1079,7 +1009,7 @@ export class IndexManager {
 	}
 
 	private async initializeManagedFolder(folderPath: string): Promise<void> {
-		if (this.disposed || this.migrationInProgress) return;
+		if (this.disposed || this.activeMigrationScope) return;
 		const folder = this.plugin.app.vault.getFolderByPath(folderPath);
 		if (!folder || !shouldAutoIndexFolder(this.getSettings(), folder.path)) return;
 
@@ -1118,23 +1048,16 @@ export class IndexManager {
 			return;
 		}
 
-		const settings = this.getSettings();
 		const oldPrefix = `${oldPath}/`;
-		const renamedPlainFolders = settings.plainFolders.map((path) =>
-			path === oldPath
-				? file.path
-				: path.startsWith(oldPrefix)
-					? `${file.path}/${path.slice(oldPrefix.length)}`
-					: path,
+		await this.updatePlainFolders((paths) =>
+			paths.map((path) =>
+				path === oldPath
+					? file.path
+					: path.startsWith(oldPrefix)
+						? `${file.path}/${path.slice(oldPrefix.length)}`
+						: path,
+			),
 		);
-		if (
-			renamedPlainFolders.some(
-				(path, index) => path !== settings.plainFolders[index],
-			)
-		) {
-			settings.plainFolders = renamedPlainFolders;
-			await this.plugin.saveData(settings);
-		}
 
 		const newPrefix = `${file.path}/`;
 		for (const ownedPath of [...this.ownedIndexPaths]) {
@@ -1158,14 +1081,9 @@ export class IndexManager {
 	private handleDelete(file: TAbstractFile): void {
 		if (file instanceof TFolder) {
 			const prefix = `${file.path}/`;
-			const settings = this.getSettings();
-			const remainingPlainFolders = settings.plainFolders.filter(
-				(path) => path !== file.path && !path.startsWith(prefix),
+			void this.updatePlainFolders((paths) =>
+				paths.filter((path) => path !== file.path && !path.startsWith(prefix)),
 			);
-			if (remainingPlainFolders.length !== settings.plainFolders.length) {
-				settings.plainFolders = remainingPlainFolders;
-				void this.plugin.saveData(settings);
-			}
 			for (const ownedPath of [...this.ownedIndexPaths]) {
 				if (ownedPath.startsWith(prefix)) this.ownedIndexPaths.delete(ownedPath);
 			}
@@ -1177,11 +1095,21 @@ export class IndexManager {
 	}
 
 	private async stopTreatingAsPlain(folderPath: string): Promise<void> {
-		const settings = this.getSettings();
-		if (!settings.plainFolders.includes(folderPath)) return;
-		settings.plainFolders = settings.plainFolders.filter(
-			(path) => path !== folderPath,
+		await this.updatePlainFolders((paths) =>
+			paths.filter((path) => path !== folderPath),
 		);
-		await this.plugin.saveData(settings);
+	}
+
+	/** Settings belong to the plugin; unchanged lists keep the same object so nothing is saved. */
+	private async updatePlainFolders(
+		update: (paths: readonly string[]) => string[],
+	): Promise<void> {
+		await this.updateSettings((settings) => {
+			const plainFolders = update(settings.plainFolders);
+			const unchanged =
+				plainFolders.length === settings.plainFolders.length &&
+				plainFolders.every((path, index) => path === settings.plainFolders[index]);
+			return unchanged ? settings : { ...settings, plainFolders };
+		});
 	}
 }

@@ -9,13 +9,18 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import {
+	INDEX_FOLDER_NAME_KEY,
+	INDEX_ID_KEY,
+	INDEX_OWNER_KEY,
+	INDEX_OWNER_VALUE,
 	buildNewIndexDocument,
 	replaceManagedBlock,
 } from '../src/index-document.ts';
+import { applyMigrationPlan } from '../src/migration/apply.ts';
 import {
 	buildMigrationPlan,
 	countMigrationActions,
-} from '../src/migration-plan.ts';
+} from '../src/migration/plan.ts';
 
 function parseArguments(argv) {
 	const options = {
@@ -85,12 +90,14 @@ async function collectEntries(vaultPath, directoryPath, entries) {
 	}
 }
 
+const OWNERSHIP_KEYS = [INDEX_OWNER_KEY, INDEX_ID_KEY, INDEX_FOLDER_NAME_KEY];
+
 function setOwnershipMetadata(document, folderName, indexId) {
 	const eol = document.includes('\r\n') ? '\r\n' : '\n';
 	const metadata = [
-		'index-plugin: folder-index',
-		`index-plugin-id: ${indexId}`,
-		`index-plugin-folder-name: ${JSON.stringify(folderName)}`,
+		`${INDEX_OWNER_KEY}: ${INDEX_OWNER_VALUE}`,
+		`${INDEX_ID_KEY}: ${indexId}`,
+		`${INDEX_FOLDER_NAME_KEY}: ${JSON.stringify(folderName)}`,
 	];
 	if (!document.startsWith(`---${eol}`)) {
 		return `---${eol}${metadata.join(eol)}${eol}---${eol}${document}`;
@@ -103,12 +110,7 @@ function setOwnershipMetadata(document, folderName, indexId) {
 	const frontmatter = document.slice(3 + eol.length, closingIndex);
 	const userLines = frontmatter
 		.split(eol)
-		.filter(
-			(line) =>
-				!/^(?:index-plugin|index-plugin-id|index-plugin-folder-name):/.test(
-					line,
-				),
-		);
+		.filter((line) => !OWNERSHIP_KEYS.some((key) => line.startsWith(`${key}:`)));
 	const updated = [...userLines, ...metadata].filter(
 		(line, index, lines) => line !== '' || index !== lines.length - 1,
 	);
@@ -117,195 +119,88 @@ function setOwnershipMetadata(document, folderName, indexId) {
 
 function findIndexId(document) {
 	return (
-		document.match(/^index-plugin-id:\s*([^\r\n]+)$/m)?.[1]?.trim() ??
+		document.match(new RegExp(`^${INDEX_ID_KEY}:\\s*([^\\r\\n]+)$`, 'm'))?.[1]?.trim() ??
 		randomUUID()
 	);
 }
 
-function removeMarkdownExtension(filePath) {
-	return filePath.toLowerCase().endsWith('.md') ? filePath.slice(0, -3) : filePath;
-}
-
-function makeLink(targetPath, alias) {
-	return `- [[${removeMarkdownExtension(targetPath)}|${alias}]]`;
-}
-
-async function buildChildLinks(vaultPath, action, actionByFolder) {
-	const folderPath = toFilesystemPath(vaultPath, action.folderPath);
-	const items = await readdir(folderPath, { withFileTypes: true });
-	const collator = new Intl.Collator(undefined, {
-		numeric: true,
-		sensitivity: 'base',
-	});
-	items.sort((left, right) => {
-		if (left.isDirectory() && !right.isDirectory()) return -1;
-		if (!left.isDirectory() && right.isDirectory()) return 1;
-		return collator.compare(left.name, right.name);
-	});
-	const links = [];
-	for (const item of items) {
-		const itemVaultPath = `${action.folderPath}/${item.name}`;
-		if (item.isDirectory()) {
-			const childAction = actionByFolder.get(itemVaultPath);
-			let targetPath = childAction?.targetPath;
-			if (!targetPath) {
-				const sameName = `${itemVaultPath}/${item.name}.md`;
-				const legacy = `${itemVaultPath}/index.md`;
-				try {
-					await stat(toFilesystemPath(vaultPath, sameName));
-					targetPath = sameName;
-				} catch {
-					try {
-						await stat(toFilesystemPath(vaultPath, legacy));
-						targetPath = legacy;
-					} catch {
-						continue;
-					}
-				}
-			}
-			links.push(makeLink(targetPath, `${item.name}/`));
-		} else if (item.isFile() && itemVaultPath !== action.targetPath) {
-			links.push(
-				makeLink(
-					itemVaultPath,
-					item.name.toLowerCase().endsWith('.md')
-						? item.name.slice(0, -3)
-						: item.name,
-				),
-			);
-		}
+async function statIfExists(filesystemPath) {
+	try {
+		return await stat(filesystemPath);
+	} catch (error) {
+		if (error?.code === 'ENOENT') return null;
+		throw error;
 	}
-	return links;
 }
 
-async function writeBackupManifest(vaultPath, plan) {
-	const filePaths = new Set(
-		plan.actions.flatMap((action) =>
-			action.sourcePath ? [action.sourcePath] : [],
-		),
-	);
-	for (const duplicate of plan.duplicates) filePaths.add(duplicate.path);
-	const files = [];
-	for (const filePath of filePaths) {
-		const filesystemPath = toFilesystemPath(vaultPath, filePath);
-		const fileStats = await stat(filesystemPath);
-		files.push({
-			path: filePath,
-			content: await readFile(filesystemPath, 'utf8'),
-			ctime: fileStats.ctimeMs,
-			mtime: fileStats.mtimeMs,
-		});
-	}
-	const backupDirectory = path.join(
+function createFilesystemHost(vaultPath) {
+	const trashRoot = path.join(
 		vaultPath,
-		'.obsidian',
-		'plugins',
-		'index-plugin',
-		'migration-backups',
+		'.trash',
+		'index-plugin-migration',
+		new Date().toISOString().replace(/[:.]/g, '-'),
 	);
-	await mkdir(backupDirectory, { recursive: true });
-	const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-	const backupPath = path.join(
-		backupDirectory,
-		`${timestamp}-${plan.rootPath.replace(/\//g, '-')}.json`,
-	);
-	await writeFile(
-		backupPath,
-		JSON.stringify(
-			{
-				version: 1,
-				createdAt: new Date().toISOString(),
-				plan,
-				files,
-			},
-			null,
-			2,
-		),
-		'utf8',
-	);
-	return backupPath;
-}
-
-async function applyPlan(options, plan) {
-	if (plan.blockers.length > 0) {
-		throw new Error('Migration has blockers; refusing to apply.');
-	}
-	const backupPath = await writeBackupManifest(options.vault, plan);
-	const actions = [...plan.actions].sort((left, right) =>
-		left.depth === right.depth
-			? left.folderPath.localeCompare(right.folderPath)
-			: right.depth - left.depth,
-	);
-
-	for (const action of actions) {
-		const targetPath = toFilesystemPath(options.vault, action.targetPath);
-		if (
-			action.kind === 'adopt-same-name' &&
-			action.sourcePath !== action.targetPath
-		) {
+	return {
+		async findFile(filePath) {
+			const fileStats = await statIfExists(toFilesystemPath(vaultPath, filePath));
+			return fileStats ? `${fileStats.dev}:${fileStats.ino}` : null;
+		},
+		async readBackupFile(filePath) {
+			const filesystemPath = toFilesystemPath(vaultPath, filePath);
+			const fileStats = await statIfExists(filesystemPath);
+			if (!fileStats) return null;
+			return {
+				path: filePath,
+				content: await readFile(filesystemPath, 'utf8'),
+				ctime: fileStats.ctimeMs,
+				mtime: fileStats.mtimeMs,
+			};
+		},
+		async writeBackup(fileName, manifest) {
+			const backupDirectory = path.join(
+				vaultPath,
+				'.obsidian',
+				'plugins',
+				'index-plugin',
+				'migration-backups',
+			);
+			await mkdir(backupDirectory, { recursive: true });
+			const backupPath = path.join(backupDirectory, fileName);
+			await writeFile(backupPath, manifest, 'utf8');
+			return backupPath;
+		},
+		async renameFile(sourcePath, targetPath) {
 			await rename(
-				toFilesystemPath(options.vault, action.sourcePath),
-				targetPath,
+				toFilesystemPath(vaultPath, sourcePath),
+				toFilesystemPath(vaultPath, targetPath),
 			);
-		} else if (action.kind === 'move-sidecar-and-adopt') {
-			await rename(
-				toFilesystemPath(options.vault, action.sourcePath),
-				targetPath,
-			);
-		} else if (action.kind === 'adopt-legacy-index') {
-			await rename(
-				toFilesystemPath(options.vault, action.sourcePath),
-				targetPath,
-			);
-		} else if (action.kind === 'create') {
-			await writeFile(
-				targetPath,
-				buildNewIndexDocument(path.posix.basename(action.folderPath), randomUUID()),
-				{ encoding: 'utf8', flag: 'wx' },
-			);
-		}
-
-		if (action.kind !== 'create') {
+		},
+		async adoptFolder(action) {
+			const targetPath = toFilesystemPath(vaultPath, action.targetPath);
+			const folderName = path.posix.basename(action.folderPath);
+			if (action.kind === 'create') {
+				const document = buildNewIndexDocument(folderName, randomUUID());
+				await writeFile(targetPath, document, { encoding: 'utf8', flag: 'wx' });
+				return;
+			}
+			if (action.kind === 'adopt-legacy-index') {
+				await rename(toFilesystemPath(vaultPath, action.sourcePath), targetPath);
+			}
 			const document = await readFile(targetPath, 'utf8');
-			const owned = setOwnershipMetadata(
-				document,
-				path.posix.basename(action.folderPath),
-				findIndexId(document),
-			);
+			const owned = setOwnershipMetadata(document, folderName, findIndexId(document));
+			// Links are left empty; the plugin fills every managed block when the vault opens.
 			await writeFile(targetPath, replaceManagedBlock(owned, []), 'utf8');
-		}
-	}
-
-	const actionByFolder = new Map(
-		plan.actions.map((action) => [action.folderPath, action]),
-	);
-	for (const action of actions) {
-		const targetPath = toFilesystemPath(options.vault, action.targetPath);
-		const document = await readFile(targetPath, 'utf8');
-		const links = await buildChildLinks(options.vault, action, actionByFolder);
-		await writeFile(targetPath, replaceManagedBlock(document, links), 'utf8');
-	}
-
-	let trashedDuplicates = 0;
-	if (options.trashEmptyDuplicates) {
-		const trashRoot = path.join(
-			options.vault,
-			'.trash',
-			'index-plugin-migration',
-			new Date().toISOString().replace(/[:.]/g, '-'),
-		);
-		for (const duplicate of plan.duplicates) {
-			if (duplicate.size !== 0) continue;
-			const sourcePath = toFilesystemPath(options.vault, duplicate.path);
-			if ((await stat(sourcePath)).size !== 0) continue;
-			const trashPath = path.join(trashRoot, ...duplicate.path.split('/'));
+		},
+		async trashEmptyFile(filePath) {
+			const sourcePath = toFilesystemPath(vaultPath, filePath);
+			const fileStats = await statIfExists(sourcePath);
+			if (!fileStats || fileStats.size !== 0) return false;
+			const trashPath = path.join(trashRoot, ...filePath.split('/'));
 			await mkdir(path.dirname(trashPath), { recursive: true });
 			await rename(sourcePath, trashPath);
-			trashedDuplicates += 1;
-		}
-	}
-
-	return { backupPath, convertedFolders: actions.length, trashedDuplicates };
+			return true;
+		},
+	};
 }
 
 async function main() {
@@ -342,7 +237,11 @@ async function main() {
 		console.log(JSON.stringify(preview, null, 2));
 		return;
 	}
-	const result = await applyPlan(options, plan);
+	const result = await applyMigrationPlan(
+		plan,
+		createFilesystemHost(options.vault),
+		{ trashEmptyDuplicates: options.trashEmptyDuplicates },
+	);
 	console.log(JSON.stringify({ preview, result }, null, 2));
 }
 

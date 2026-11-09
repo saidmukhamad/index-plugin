@@ -4,7 +4,7 @@ import {
 	buildMigrationPlan,
 	countMigrationActions,
 	getMigrationDepth,
-} from '../src/migration-plan.ts';
+} from '../../src/migration/plan.ts';
 
 void test('calculates descendant depth without matching sibling prefixes', () => {
 	assert.equal(getMigrationDepth('logs', 'logs'), 0);

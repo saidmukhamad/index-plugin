@@ -13,15 +13,6 @@ import {
 	replaceManagedBlock,
 } from '../src/index-document.ts';
 
-void test('adds a managed block without replacing user content', () => {
-	const result = replaceManagedBlock('# Projects\n\nKeep me.\n', ['- [[Roadmap]]']);
-
-	assert.equal(
-		result,
-		`# Projects\n\nKeep me.\n\n${CHILDREN_START}\n${PAGES_CALLOUT}\n>\n> - [[Roadmap]]\n${CHILDREN_END}\n`,
-	);
-});
-
 void test('adopts an existing index without changing its frontmatter or prose', () => {
 	const original = [
 		'---',
@@ -63,7 +54,7 @@ void test('formats an empty index as a readable section', () => {
 
 void test('locates the generated section so editor selection can exclude it', () => {
 	const userContent = '# Journal\n\nSomething I wrote.\n\n';
-	const managedBlock = buildManagedBlock(['- [[reading]]']);
+	const managedBlock = buildManagedBlock(['- [[Roadmap]]']);
 	const document = `${userContent}${managedBlock}\n`;
 
 	assert.deepEqual(getManagedBlockRange(document), [

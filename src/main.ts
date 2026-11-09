@@ -9,10 +9,10 @@ import {
 } from 'obsidian';
 import { hideManagedMarkersExtension } from './editor-markers';
 import { ExplorerIntegration } from './explorer-integration';
-import { FolderNameModal } from './folder-name-modal';
 import { IndexManager } from './index-manager';
-import { MigrationModal } from './migration-modal';
-import { NoteNameModal } from './note-name-modal';
+import { MigrationModal } from './migration/modal';
+import { NameModal } from './name-modal';
+import { normalizeFolderName, normalizeNoteName } from './note-name';
 import {
 	DEFAULT_SETTINGS,
 	type IndexPluginSettings,
@@ -29,7 +29,11 @@ export default class IndexPlugin extends Plugin {
 		this.settings = loadIndexPluginSettings(await this.loadData());
 		this.registerEditorExtension(hideManagedMarkersExtension);
 
-		this.indexManager = new IndexManager(this, () => this.settings);
+		this.indexManager = new IndexManager(
+			this,
+			() => this.settings,
+			(update) => this.updateSettings(update),
+		);
 		this.indexManager.start();
 
 		this.explorerIntegration = new ExplorerIntegration(this, this.indexManager);
@@ -85,66 +89,20 @@ export default class IndexPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.workspace.on('file-menu', (menu, file) => {
+				const add = (title: string, icon: string, action: () => void): void => {
+					menu.addItem((item) => item.setTitle(title).setIcon(icon).onClick(action));
+				};
 				if (file instanceof TFolder) {
 					if (!file.isRoot()) {
-						menu.addItem((item) =>
-							item
-								.setTitle('Migrate folder tree (indexed)…')
-								.setIcon('folder-tree')
-								.onClick(() => {
-									this.openMigration(file);
-								}),
-						);
-						menu.addItem((item) =>
-							item
-								.setTitle('Convert (indexed)')
-								.setIcon('folder-cog')
-								.onClick(() => {
-									void this.convertFolder(file);
-								}),
-						);
-						menu.addItem((item) =>
-							item
-								.setTitle('Open folder index')
-								.setIcon('notebook-tabs')
-								.onClick(() => {
-									void this.indexManager.openIndex(file, false);
-								}),
-						);
-						menu.addItem((item) =>
-							item
-								.setTitle('Create new (indexed)')
-								.setIcon('file-plus-2')
-								.onClick(() => {
-									void this.promptAndCreate(file);
-								}),
-						);
+						add('Migrate folder tree (indexed)…', 'folder-tree', () => this.openMigration(file));
+						add('Convert (indexed)', 'folder-cog', () => void this.convertFolder(file));
+						add('Open folder index', 'notebook-tabs', () => void this.indexManager.openIndex(file, false));
+						add('Create new (indexed)', 'file-plus-2', () => void this.promptAndCreate(file));
 					}
-					menu.addItem((item) =>
-						item
-							.setTitle('Create folder')
-							.setIcon('folder-plus')
-							.onClick(() => {
-								void this.promptAndCreateFolder(file);
-							}),
-					);
+					add('Create folder', 'folder-plus', () => void this.promptAndCreateFolder(file));
 				} else if (file instanceof TFile && file.extension === 'md') {
-					menu.addItem((item) =>
-						item
-							.setTitle('Create new (indexed)')
-							.setIcon('file-plus-2')
-							.onClick(() => {
-								void this.promptAndCreate(file);
-							}),
-					);
-					menu.addItem((item) =>
-						item
-							.setTitle('Create folder')
-							.setIcon('folder-plus')
-							.onClick(() => {
-								void this.promptAndCreateFolder(file);
-							}),
-					);
+					add('Create new (indexed)', 'file-plus-2', () => void this.promptAndCreate(file));
+					add('Create folder', 'folder-plus', () => void this.promptAndCreateFolder(file));
 				}
 			}),
 		);
@@ -154,23 +112,33 @@ export default class IndexPlugin extends Plugin {
 		new MigrationModal(this.app, {
 			manager: this.indexManager,
 			root: folder,
-			onBeforeApply: async (maxDepth) => {
-				this.settings = upsertManagedRoot(this.settings, {
-					path: folder.path,
-					maxDepth,
-					autoAdopt: true,
-				});
-				await this.saveData(this.settings);
-			},
+			onBeforeApply: (maxDepth) =>
+				this.updateSettings((settings) =>
+					upsertManagedRoot(settings, {
+						path: folder.path,
+						maxDepth,
+						autoAdopt: true,
+					}),
+				),
 		}).open();
 	}
 
-	async saveSettings(): Promise<void> {
+	async updateSettings(
+		update: (settings: IndexPluginSettings) => IndexPluginSettings,
+	): Promise<void> {
+		const next = update(this.settings);
+		if (next === this.settings) return;
+		this.settings = next;
 		await this.saveData(this.settings);
 	}
 
 	private async promptAndCreate(target: TFile | TFolder): Promise<void> {
-		const noteName = await NoteNameModal.prompt(this.app);
+		const noteName = await NameModal.prompt(this.app, {
+			title: 'Create new (indexed)',
+			label: 'Note name',
+			description: 'Creates a child note and links it from the folder index.',
+			normalize: normalizeNoteName,
+		});
 		if (!noteName) return;
 
 		try {
@@ -182,7 +150,12 @@ export default class IndexPlugin extends Plugin {
 	}
 
 	private async promptAndCreateFolder(target: TFile | TFolder): Promise<void> {
-		const folderName = await FolderNameModal.prompt(this.app);
+		const folderName = await NameModal.prompt(this.app, {
+			title: 'Create folder',
+			label: 'Folder name',
+			description: 'Creates a plain folder without an index note.',
+			normalize: normalizeFolderName,
+		});
 		if (!folderName) return;
 
 		try {
@@ -237,8 +210,10 @@ class IndexPluginSettingTab extends PluginSettingTab {
 			.addToggle((toggle) => {
 				toggle.setValue(this.plugin.settings.autoIndexNewFolders);
 				toggle.onChange(async (value) => {
-					this.plugin.settings.autoIndexNewFolders = value;
-					await this.plugin.saveSettings();
+					await this.plugin.updateSettings((settings) => ({
+						...settings,
+						autoIndexNewFolders: value,
+					}));
 				});
 			});
 
@@ -258,11 +233,12 @@ class IndexPluginSettingTab extends PluginSettingTab {
 						button.setButtonText('Remove');
 						button.setWarning();
 						button.onClick(async () => {
-							this.plugin.settings.managedRoots =
-								this.plugin.settings.managedRoots.filter(
+							await this.plugin.updateSettings((settings) => ({
+								...settings,
+								managedRoots: settings.managedRoots.filter(
 									(item) => item.path !== rule.path,
-								);
-							await this.plugin.saveSettings();
+								),
+							}));
 							this.display();
 						});
 					});
@@ -282,11 +258,12 @@ class IndexPluginSettingTab extends PluginSettingTab {
 					.addButton((button) => {
 						button.setButtonText('Allow indexing');
 						button.onClick(async () => {
-							this.plugin.settings.plainFolders =
-								this.plugin.settings.plainFolders.filter(
+							await this.plugin.updateSettings((settings) => ({
+								...settings,
+								plainFolders: settings.plainFolders.filter(
 									(item) => item !== path,
-								);
-							await this.plugin.saveSettings();
+								),
+							}));
 							this.display();
 						});
 					});
