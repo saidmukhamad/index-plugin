@@ -134,6 +134,7 @@ export class IndexManager {
 					if (changed) {
 						this.emitOwnedIndexesChanged();
 						this.scheduleFolderSync(file.parent?.path ?? '');
+						this.scheduleFolderSync(file.parent?.parent?.path ?? '');
 					}
 				}),
 			);
@@ -952,13 +953,21 @@ export class IndexManager {
 	private async handleCreate(file: TAbstractFile): Promise<void> {
 		if (file instanceof TFolder) {
 			if (this.suppressedFolderCreates.has(file.path)) return;
+			this.scheduleFolderSync(file.parent?.path ?? '');
 			this.scheduleFolderInitialization(file);
 			return;
 		}
 
 		if (this.pendingIndexCreates.has(file.path)) return;
 		this.scheduleFolderSync(file.parent?.path ?? '');
-		if (file instanceof TFile) this.scheduleConventionalIndexAdoption(file);
+		if (file instanceof TFile) {
+			// An existing folder note becomes a link in the parent index even when
+			// automatic indexing is disabled or the folder is beyond its depth limit.
+			if (file.parent && (this.isOwnedIndex(file) || this.getConventionalIndex(file.parent) === file)) {
+				this.scheduleFolderSync(file.parent.parent?.path ?? '');
+			}
+			this.scheduleConventionalIndexAdoption(file);
+		}
 	}
 
 	private handleModify(file: TFile): void {

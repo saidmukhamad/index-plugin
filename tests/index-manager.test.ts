@@ -71,6 +71,7 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 	const metadata = new Events();
 	const cleanups: (() => void)[] = [];
 	const writes: string[] = [];
+	const documents = new Map<string, string>();
 	const renames: string[] = [];
 	const notices: { message: string; hidden: boolean }[] = [];
 	const errors: unknown[][] = [];
@@ -101,7 +102,9 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 				process: async (file: FakeFile, transform: (data: string) => string) => {
 					writes.push(file.path);
 					await processHook?.();
-					return transform('');
+					const document = transform(documents.get(file.path) ?? '');
+					documents.set(file.path, document);
+					return document;
 				},
 			},
 			fileManager: {
@@ -155,7 +158,29 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 	);
 	manager.start();
 	return {
-		manager, index, folder, writes, renames, notices, errors,
+		manager, index, folder, writes, renames, notices, errors, documents,
+		setManagedDepth(maxDepth: number) {
+			settings = { ...settings, autoIndexNewFolders: true,
+				managedRoots: [{ path: folder.path, maxDepth, autoAdopt: true }] };
+		},
+		addFolder(name: string, emitCreate = true) {
+			const child = new FakeFolder(`${folder.path}/${name}`, folder);
+			folders.push(child);
+			if (emitCreate) events.emit('create', child);
+			return child;
+		},
+		addFolderNote(child: FakeFolder, emitCreate = true) {
+			const note = new FakeFile(`${child.name}.md`, child);
+			if (emitCreate) events.emit('create', note);
+			return note;
+		},
+		markOwned(note: FakeFile) {
+			caches.set(note, { frontmatter: {
+				'index-plugin': 'folder-index',
+				'index-plugin-folder-name': note.parent.name,
+			} });
+			metadata.emit('changed', note, '', caches.get(note));
+		},
 		get frontmatterWrites() { return frontmatterWrites; },
 		get settings() { return settings; },
 		get settingsSaves() { return settingsSaves; },
@@ -187,6 +212,46 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 		},
 	};
 }
+
+void test('refreshes parent links when a folder appears beyond the managed depth', async () => {
+	const h = harness();
+	h.setManagedDepth(0);
+	await h.advance(120);
+	const child = h.addFolder('reading');
+	h.addFolderNote(child, false);
+	await h.advance(120);
+	assert.match(h.documents.get(h.index.path)!, /\[\[Projects\/reading\/reading.md\]\]/);
+	assert.deepEqual(h.errors, []);
+	h.unload();
+});
+
+void test('refreshes parent links when a conventional note arrives after the folder sync', async () => {
+	const h = harness();
+	h.setManagedDepth(0);
+	await h.advance(120);
+	const child = h.addFolder('reading');
+	await h.advance(120);
+	assert.doesNotMatch(h.documents.get(h.index.path)!, /reading/);
+	h.addFolderNote(child);
+	await h.advance(120);
+	assert.match(h.documents.get(h.index.path)!, /\[\[Projects\/reading\/reading.md\]\]/);
+	assert.deepEqual(h.errors, []);
+	h.unload();
+});
+
+void test('refreshes parent links when metadata discovers an owned child index', async () => {
+	const h = harness();
+	h.setManagedDepth(0);
+	await h.advance(120);
+	const child = h.addFolder('reading', false);
+	const note = h.addFolderNote(child, false);
+	h.markOwned(note);
+	await h.advance(120);
+	assert.match(h.documents.get(h.index.path)!, /\[\[Projects\/reading\/reading.md\]\]/);
+	assert.ok(h.documents.has(note.path));
+	assert.deepEqual(h.errors, []);
+	h.unload();
+});
 
 void test('leaves temporary case-renames alone until the final rename, including metadata events', async () => {
 	const h = harness();
