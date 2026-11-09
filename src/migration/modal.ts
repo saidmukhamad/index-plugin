@@ -1,6 +1,6 @@
 import { App, Modal, Notice, Setting, TFolder } from 'obsidian';
-import type { IndexManager } from './index-manager';
-import { countMigrationActions, type MigrationPlan } from './migration-plan';
+import type { IndexManager } from '../index-manager';
+import { countMigrationActions, type MigrationPlan } from './plan';
 
 interface MigrationModalOptions {
 	manager: IndexManager;

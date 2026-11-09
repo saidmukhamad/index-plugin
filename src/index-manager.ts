@@ -21,13 +21,13 @@ import {
 	applyMigrationPlan,
 	type MigrationApplyResult,
 	type MigrationHost,
-} from './migration-apply';
+} from './migration/apply';
 import {
 	buildMigrationPlan,
 	getMigrationDepth,
 	type MigrationEntryDescriptor,
 	type MigrationPlan,
-} from './migration-plan';
+} from './migration/plan';
 import { normalizeFolderName, normalizeNoteName } from './note-name';
 import {
 	type IndexPluginSettings,
@@ -439,12 +439,7 @@ export class IndexManager {
 			readBackupFile: async (path) => {
 				const file = vault.getFileByPath(path);
 				if (!file) return null;
-				return {
-					path: file.path,
-					content: await vault.read(file),
-					ctime: file.stat.ctime,
-					mtime: file.stat.mtime,
-				};
+				return { path, content: await vault.read(file), ctime: file.stat.ctime, mtime: file.stat.mtime };
 			},
 			writeBackup: async (fileName, manifest) => {
 				const pluginDirectory =

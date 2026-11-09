@@ -72,4 +72,4 @@ Preview a scoped migration without writing anything:
 npm run migrate:vault -- --vault /absolute/path/to/vault --root logs --max-depth 3
 ```
 
-After reviewing the preview, add `--apply`. Add `--trash-empty-duplicates` only when the reported duplicates are safe to move into the vault's recoverable trash. The command writes a restoration manifest under `.obsidian/plugins/index-plugin/migration-backups/` before changing notes.
+After reviewing the preview, add `--apply`. Add `--trash-empty-duplicates` only when the reported duplicates are safe to move into the vault's recoverable trash. The command writes a restoration manifest under `.obsidian/plugins/index-plugin/migration-backups/` before changing notes. Folder notes start with an empty Pages section; the plugin fills in the links the next time Obsidian opens the vault.

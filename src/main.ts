@@ -10,7 +10,7 @@ import {
 import { hideManagedMarkersExtension } from './editor-markers';
 import { ExplorerIntegration } from './explorer-integration';
 import { IndexManager } from './index-manager';
-import { MigrationModal } from './migration-modal';
+import { MigrationModal } from './migration/modal';
 import { NameModal } from './name-modal';
 import { normalizeFolderName, normalizeNoteName } from './note-name';
 import {

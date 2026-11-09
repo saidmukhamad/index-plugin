@@ -16,11 +16,11 @@ import {
 	buildNewIndexDocument,
 	replaceManagedBlock,
 } from '../src/index-document.ts';
-import { applyMigrationPlan } from '../src/migration-apply.ts';
+import { applyMigrationPlan } from '../src/migration/apply.ts';
 import {
 	buildMigrationPlan,
 	countMigrationActions,
-} from '../src/migration-plan.ts';
+} from '../src/migration/plan.ts';
 
 function parseArguments(argv) {
 	const options = {
@@ -124,62 +124,6 @@ function findIndexId(document) {
 	);
 }
 
-function removeMarkdownExtension(filePath) {
-	return filePath.toLowerCase().endsWith('.md') ? filePath.slice(0, -3) : filePath;
-}
-
-function makeLink(targetPath, alias) {
-	return `- [[${removeMarkdownExtension(targetPath)}|${alias}]]`;
-}
-
-async function buildChildLinks(vaultPath, action, actionByFolder) {
-	const folderPath = toFilesystemPath(vaultPath, action.folderPath);
-	const items = await readdir(folderPath, { withFileTypes: true });
-	const collator = new Intl.Collator(undefined, {
-		numeric: true,
-		sensitivity: 'base',
-	});
-	items.sort((left, right) => {
-		if (left.isDirectory() && !right.isDirectory()) return -1;
-		if (!left.isDirectory() && right.isDirectory()) return 1;
-		return collator.compare(left.name, right.name);
-	});
-	const links = [];
-	for (const item of items) {
-		const itemVaultPath = `${action.folderPath}/${item.name}`;
-		if (item.isDirectory()) {
-			const childAction = actionByFolder.get(itemVaultPath);
-			let targetPath = childAction?.targetPath;
-			if (!targetPath) {
-				const sameName = `${itemVaultPath}/${item.name}.md`;
-				const legacy = `${itemVaultPath}/index.md`;
-				try {
-					await stat(toFilesystemPath(vaultPath, sameName));
-					targetPath = sameName;
-				} catch {
-					try {
-						await stat(toFilesystemPath(vaultPath, legacy));
-						targetPath = legacy;
-					} catch {
-						continue;
-					}
-				}
-			}
-			links.push(makeLink(targetPath, `${item.name}/`));
-		} else if (item.isFile() && itemVaultPath !== action.targetPath) {
-			links.push(
-				makeLink(
-					itemVaultPath,
-					item.name.toLowerCase().endsWith('.md')
-						? item.name.slice(0, -3)
-						: item.name,
-				),
-			);
-		}
-	}
-	return links;
-}
-
 async function statIfExists(filesystemPath) {
 	try {
 		return await stat(filesystemPath);
@@ -189,10 +133,7 @@ async function statIfExists(filesystemPath) {
 	}
 }
 
-function createFilesystemHost(vaultPath, plan) {
-	const actionByFolder = new Map(
-		plan.actions.map((action) => [action.folderPath, action]),
-	);
+function createFilesystemHost(vaultPath) {
 	const trashRoot = path.join(
 		vaultPath,
 		'.trash',
@@ -237,21 +178,18 @@ function createFilesystemHost(vaultPath, plan) {
 		async adoptFolder(action) {
 			const targetPath = toFilesystemPath(vaultPath, action.targetPath);
 			const folderName = path.posix.basename(action.folderPath);
-			let document;
 			if (action.kind === 'create') {
-				document = buildNewIndexDocument(folderName, randomUUID());
-			} else {
-				if (action.kind === 'adopt-legacy-index') {
-					await rename(toFilesystemPath(vaultPath, action.sourcePath), targetPath);
-				}
-				const current = await readFile(targetPath, 'utf8');
-				document = setOwnershipMetadata(current, folderName, findIndexId(current));
+				const document = buildNewIndexDocument(folderName, randomUUID());
+				await writeFile(targetPath, document, { encoding: 'utf8', flag: 'wx' });
+				return;
 			}
-			const links = await buildChildLinks(vaultPath, action, actionByFolder);
-			await writeFile(targetPath, replaceManagedBlock(document, links), {
-				encoding: 'utf8',
-				flag: action.kind === 'create' ? 'wx' : 'w',
-			});
+			if (action.kind === 'adopt-legacy-index') {
+				await rename(toFilesystemPath(vaultPath, action.sourcePath), targetPath);
+			}
+			const document = await readFile(targetPath, 'utf8');
+			const owned = setOwnershipMetadata(document, folderName, findIndexId(document));
+			// Links are left empty; the plugin fills every managed block when the vault opens.
+			await writeFile(targetPath, replaceManagedBlock(owned, []), 'utf8');
 		},
 		async trashEmptyFile(filePath) {
 			const sourcePath = toFilesystemPath(vaultPath, filePath);
@@ -301,7 +239,7 @@ async function main() {
 	}
 	const result = await applyMigrationPlan(
 		plan,
-		createFilesystemHost(options.vault, plan),
+		createFilesystemHost(options.vault),
 		{ trashEmptyDuplicates: options.trashEmptyDuplicates },
 	);
 	console.log(JSON.stringify({ preview, result }, null, 2));

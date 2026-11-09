@@ -11,7 +11,7 @@
 		"build": "npm run typecheck && node esbuild.config.mjs production",
 		"lint": "eslint .",
 		"migrate:vault": "node --experimental-strip-types scripts/migrate-vault.mjs",
-		"test": "node --experimental-strip-types --test 'tests/*.test.ts'",
+		"test": "node --experimental-strip-types --test 'tests/**/*.test.ts'",
 		"check": "npm run lint && npm run test && npm run build",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},

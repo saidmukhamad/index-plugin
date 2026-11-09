@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyMigrationPlan, type MigrationHost } from '../src/migration-apply.ts';
-import type { MigrationPlan } from '../src/migration-plan.ts';
+import { applyMigrationPlan, type MigrationHost } from '../../src/migration/apply.ts';
+import type { MigrationPlan } from '../../src/migration/plan.ts';
 
 function fakeHost(files: Record<string, string>, identities: Record<string, string> = {}) {
 	const calls: string[] = [];
@@ -97,12 +97,9 @@ void test('stops before overwriting a note that appeared at the target path', as
 
 void test('refuses plans with blockers without touching the vault', async () => {
 	const fake = fakeHost({});
+	const blockers = [{ folderPath: 'logs', path: 'logs/logs.md', reason: 'folder' }];
 	await assert.rejects(
-		applyMigrationPlan(
-			{ ...plan, blockers: [{ folderPath: 'logs', path: 'logs/logs.md', reason: 'folder' }] },
-			fake.host,
-			{ trashEmptyDuplicates: false },
-		),
+		applyMigrationPlan({ ...plan, blockers }, fake.host, { trashEmptyDuplicates: false }),
 		/Resolve migration blockers/,
 	);
 	assert.deepEqual(fake.calls, []);
