@@ -89,66 +89,20 @@ export default class IndexPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.workspace.on('file-menu', (menu, file) => {
+				const add = (title: string, icon: string, action: () => void): void => {
+					menu.addItem((item) => item.setTitle(title).setIcon(icon).onClick(action));
+				};
 				if (file instanceof TFolder) {
 					if (!file.isRoot()) {
-						menu.addItem((item) =>
-							item
-								.setTitle('Migrate folder tree (indexed)…')
-								.setIcon('folder-tree')
-								.onClick(() => {
-									this.openMigration(file);
-								}),
-						);
-						menu.addItem((item) =>
-							item
-								.setTitle('Convert (indexed)')
-								.setIcon('folder-cog')
-								.onClick(() => {
-									void this.convertFolder(file);
-								}),
-						);
-						menu.addItem((item) =>
-							item
-								.setTitle('Open folder index')
-								.setIcon('notebook-tabs')
-								.onClick(() => {
-									void this.indexManager.openIndex(file, false);
-								}),
-						);
-						menu.addItem((item) =>
-							item
-								.setTitle('Create new (indexed)')
-								.setIcon('file-plus-2')
-								.onClick(() => {
-									void this.promptAndCreate(file);
-								}),
-						);
+						add('Migrate folder tree (indexed)…', 'folder-tree', () => this.openMigration(file));
+						add('Convert (indexed)', 'folder-cog', () => void this.convertFolder(file));
+						add('Open folder index', 'notebook-tabs', () => void this.indexManager.openIndex(file, false));
+						add('Create new (indexed)', 'file-plus-2', () => void this.promptAndCreate(file));
 					}
-					menu.addItem((item) =>
-						item
-							.setTitle('Create folder')
-							.setIcon('folder-plus')
-							.onClick(() => {
-								void this.promptAndCreateFolder(file);
-							}),
-					);
+					add('Create folder', 'folder-plus', () => void this.promptAndCreateFolder(file));
 				} else if (file instanceof TFile && file.extension === 'md') {
-					menu.addItem((item) =>
-						item
-							.setTitle('Create new (indexed)')
-							.setIcon('file-plus-2')
-							.onClick(() => {
-								void this.promptAndCreate(file);
-							}),
-					);
-					menu.addItem((item) =>
-						item
-							.setTitle('Create folder')
-							.setIcon('folder-plus')
-							.onClick(() => {
-								void this.promptAndCreateFolder(file);
-							}),
-					);
+					add('Create new (indexed)', 'file-plus-2', () => void this.promptAndCreate(file));
+					add('Create folder', 'folder-plus', () => void this.promptAndCreateFolder(file));
 				}
 			}),
 		);
