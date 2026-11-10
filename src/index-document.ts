@@ -5,7 +5,7 @@ export const INDEX_FOLDER_NAME_KEY = 'index-plugin-folder-name';
 
 export const CHILDREN_START = '<!-- index-plugin:children:start -->';
 export const CHILDREN_END = '<!-- index-plugin:children:end -->';
-export const PAGES_CALLOUT = '> [!index-pages] Pages';
+export const PAGES_CALLOUT = '> [!index-pages]- pages';
 export const EMPTY_CHILDREN_MESSAGE = '*No pages yet.*';
 
 export class InvalidManagedBlockError extends Error {
@@ -51,12 +51,17 @@ export function replaceManagedBlock(
 ): string {
 	const range = getManagedBlockRange(document);
 	const block = buildManagedBlock(entries);
+	const compactActivity = (prefix: string): string =>
+		prefix.replace(
+			/(> \[!activity\][^\n]*\n(?:>[^\n]*\n)*)(?:[ \t]*\n)+$/,
+			'$1',
+		);
 	if (!range) {
 		const existing = document.trimEnd();
-		return `${existing}${existing ? '\n\n' : ''}${block}\n`;
+		return `${compactActivity(`${existing}${existing ? '\n\n' : ''}`)}${block}\n`;
 	}
 
-	return `${document.slice(0, range[0])}${block}${document.slice(range[1])}`;
+	return `${compactActivity(document.slice(0, range[0]))}${block}${document.slice(range[1])}`;
 }
 
 export function removeManagedBlock(document: string): string {

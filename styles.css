@@ -78,34 +78,38 @@
 }
 
 .callout[data-callout='index-pages'] {
-	--callout-color: var(--interactive-accent-rgb);
-	--callout-icon: lucide-files;
+	--callout-color: var(--mono-rgb-100);
 	background: transparent;
-	border: 0;
-	border-radius: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
 	box-shadow: none;
-	margin-block: 2rem 0;
-	padding: 0;
+	margin-block: 0;
+	padding: 6px 10px;
+}
+
+.callout[data-callout='index-pages'] > .callout-title > .callout-icon {
+	display: none;
 }
 
 .callout[data-callout='index-pages'] > .callout-title {
 	align-items: center;
-	border-bottom: 1px solid var(--background-modifier-border);
 	color: var(--text-muted);
-	font-size: var(--font-ui-small);
-	font-weight: var(--font-semibold);
-	letter-spacing: 0.08em;
-	padding: 0 0 0.55rem;
-	text-transform: uppercase;
+	font-weight: 500;
+	gap: 6px;
+	text-transform: lowercase;
+}
+
+.callout[data-callout='index-pages'] > .callout-title > .callout-fold {
+	color: var(--text-faint);
 }
 
 .callout[data-callout='index-pages'] > .callout-content {
-	padding: 0.55rem 0 0;
+	padding: 4px 0 0;
 }
 
 .callout[data-callout='index-pages'] > .callout-content > ul {
 	display: grid;
-	gap: 0.2rem;
+	gap: 2px;
 	list-style: none;
 	margin: 0;
 	padding: 0;
@@ -120,16 +124,9 @@
 	border-radius: var(--radius-s);
 	color: var(--text-normal);
 	display: block;
-	font-weight: var(--font-medium);
-	padding: 0.45rem 0.6rem;
+	font-weight: var(--font-normal);
+	padding: 2px 4px;
 	text-decoration: none;
-}
-
-.callout[data-callout='index-pages'] .internal-link::before {
-	color: var(--text-faint);
-	content: '↳';
-	display: inline-block;
-	margin-inline-end: 0.55rem;
 }
 
 .callout[data-callout='index-pages'] .internal-link:hover {

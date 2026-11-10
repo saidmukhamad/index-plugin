@@ -9,7 +9,7 @@ Index Plugin gives an indexed folder its own Markdown document, opens that docum
 ## Features
 
 - **Folders open like notes.** Click a folder name to open its document; use the chevron to expand or collapse it.
-- **Automatic Pages list.** Direct child notes and subfolders appear in a styled, naturally sorted list and stay synchronized as files change.
+- **Compact pages section.** Direct child notes and subfolders appear in a naturally sorted list inside a collapsed, lowercase `pages` section. Neutral colors, no icon, and tight spacing keep it consistent with compact activity views. The list stays synchronized as files change.
 - **One name everywhere.** `Projects/Projects.md` represents the `Projects` folder. Rename the folder or its visible note title and the other follows.
 - **Useful Graph View nodes.** Folder notes use real folder names instead of a sea of files called `index`.
 - **Note-to-folder conversion.** Run **Create new (indexed)** on `Project.md` to turn it into `Project/Project.md` and create a linked child note.

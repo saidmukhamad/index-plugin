@@ -52,6 +52,25 @@ void test('formats an empty index as a readable section', () => {
 	);
 });
 
+void test('upgrades legacy Pages to a folded section without touching the journal', () => {
+	const journal = '# Daily note\n\nMy writing stays here.\n\n';
+	const legacy = `${journal}${CHILDREN_START}\n> [!index-pages] Pages\n>\n> - [[Old]]\n${CHILDREN_END}\nAfter the index.\n`;
+	const result = replaceManagedBlock(legacy, ['- [[New]]']);
+	assert.ok(result.startsWith(journal));
+	assert.ok(result.endsWith('\nAfter the index.\n'));
+	assert.ok(result.includes('> [!index-pages]- pages'));
+	assert.equal(replaceManagedBlock(result, ['- [[New]]']), result);
+});
+
+void test('keeps pages directly after activity on creation and later refreshes', () => {
+	const activity = '> [!activity]- activity\n> ![[Daily activity.base]]\n';
+	const result = replaceManagedBlock(`${activity}\n\n`, []);
+	assert.ok(result.startsWith(`${activity}${CHILDREN_START}\n`));
+	assert.equal(replaceManagedBlock(result, []), result);
+	const legacy = `${activity}\n\n${buildManagedBlock([])}\n`;
+	assert.equal(replaceManagedBlock(legacy, []), result);
+});
+
 void test('locates the generated section so editor selection can exclude it', () => {
 	const userContent = '# Journal\n\nSomething I wrote.\n\n';
 	const managedBlock = buildManagedBlock(['- [[Roadmap]]']);
