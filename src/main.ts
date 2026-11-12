@@ -7,6 +7,7 @@ import {
 	TFile,
 	TFolder,
 } from 'obsidian';
+import { ChildCreation, createApi, type IndexPluginApi } from './api';
 import { hideManagedMarkersExtension } from './editor-markers';
 import { ExplorerIntegration } from './explorer-integration';
 import { IndexManager } from './index-manager';
@@ -22,6 +23,8 @@ import {
 
 export default class IndexPlugin extends Plugin {
 	settings: IndexPluginSettings = structuredClone(DEFAULT_SETTINGS);
+	api!: IndexPluginApi;
+	private readonly childCreation = new ChildCreation();
 	private indexManager!: IndexManager;
 	private explorerIntegration!: ExplorerIntegration;
 
@@ -34,7 +37,10 @@ export default class IndexPlugin extends Plugin {
 			() => this.settings,
 			(update) => this.updateSettings(update),
 		);
+		this.api = createApi(this.indexManager, this.childCreation);
+		this.register(() => this.childCreation.dispose());
 		this.indexManager.start();
+		this.app.workspace.trigger('index-plugin:api-ready', this.api);
 
 		this.explorerIntegration = new ExplorerIntegration(this, this.indexManager);
 		this.explorerIntegration.start();
@@ -133,6 +139,14 @@ export default class IndexPlugin extends Plugin {
 	}
 
 	private async promptAndCreate(target: TFile | TFolder): Promise<void> {
+		try {
+			const folder = await this.indexManager.prepareTargetFolder(target);
+			if (folder && await this.childCreation.tryOpen(folder.path)) return;
+			if (folder && await this.indexManager.folderPages.discover(folder)) throw new Error('The creation form for this topic is unavailable. Reload the learning input automation.');
+		} catch (error) {
+			new Notice(error instanceof Error ? error.message : 'Could not open the creation form.');
+			return;
+		}
 		const noteName = await NameModal.prompt(this.app, {
 			title: 'Create new (indexed)',
 			label: 'Note name',

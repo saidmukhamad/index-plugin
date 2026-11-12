@@ -100,6 +100,7 @@ export class ExplorerIntegration {
 		this.observer = null;
 		this.removeIndexListener?.();
 		this.removeIndexListener = null;
+		activeDocument.querySelectorAll(`.${OWNED_INDEX_CLASS}, .${INDEXED_FOLDER_CLASS}`).forEach(el => { el.classList.remove(OWNED_INDEX_CLASS, INDEXED_FOLDER_CLASS); });
 		this.plugin.app.workspace.iterateAllLeaves((leaf) => {
 			if (leaf.view instanceof MarkdownView) this.restoreFileTitle(leaf.view);
 		});
@@ -124,9 +125,11 @@ export class ExplorerIntegration {
 		this.plugin.app.workspace.iterateAllLeaves((leaf) => {
 			const view = leaf.view;
 			if (!(view instanceof MarkdownView)) return;
-			const owned = this.manager.isOwnedIndex(view.file);
+			let represented: TFolder | null = null;
+			try { represented = this.manager.getRepresentedFolder(view.file); } catch { /* Keep conflicts visible for repair. */ }
+			const owned = represented !== null;
 			view.containerEl.classList.toggle(INDEX_VIEW_CLASS, owned);
-			if (!owned || !view.file?.parent) {
+			if (!owned || !represented) {
 				view.containerEl.classList.remove(HIDE_PROPERTIES_CLASS);
 				view.containerEl.classList.remove(MANAGED_ALIAS_CLASS);
 				this.restoreFileTitle(view);
@@ -138,7 +141,7 @@ export class ExplorerIntegration {
 				return;
 			}
 
-			this.refreshFolderTitle(view, view.file.parent);
+			this.refreshFolderTitle(view, represented);
 			this.refreshPropertyVisibility(view);
 		});
 		this.refreshPropertiesStatus();
@@ -306,7 +309,7 @@ export class ExplorerIntegration {
 			.querySelectorAll<HTMLElement>('.nav-file-title[data-path]')
 			.forEach((title) => {
 				const path = title.dataset.path;
-				if (!path || !this.manager.isOwnedIndexPath(path)) return;
+				if (!path || !this.manager.isFolderPagePath(path)) return;
 				(title.closest('.nav-file') ?? title).classList.add(OWNED_INDEX_CLASS);
 			});
 
@@ -317,7 +320,9 @@ export class ExplorerIntegration {
 				const folder = path
 					? this.plugin.app.vault.getFolderByPath(path)
 					: null;
-				if (folder && !this.manager.isPlainFolder(folder)) {
+				let indexed = false;
+				try { indexed = !!folder && !this.manager.isPlainFolder(folder); } catch { /* Conflicting pages stay visible. */ }
+				if (indexed) {
 					title.classList.add(INDEXED_FOLDER_CLASS);
 				}
 			});
@@ -333,7 +338,8 @@ export class ExplorerIntegration {
 
 		const folder = this.plugin.app.vault.getFolderByPath(folderPath);
 		if (!(folder instanceof TFolder) || folder.isRoot()) return;
-		if (this.manager.isPlainFolder(folder)) return;
+		try { if (this.manager.isPlainFolder(folder)) return; }
+		catch (error) { event.preventDefault(); event.stopImmediatePropagation(); new Notice(error instanceof Error ? error.message : 'Conflicting folder pages.'); return; }
 
 		event.preventDefault();
 		event.stopImmediatePropagation();

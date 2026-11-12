@@ -15,6 +15,7 @@ import {
 	removeManagedBlock,
 	replaceManagedBlock,
 } from './index-document';
+import { FolderPages, FOLDER_PAGE_KEY } from './folder-pages';
 import { FolderWorkQueue } from './folder-work-queue';
 import { getFolderIndexFilename, getFolderIndexPath, isTemporaryFolderIndex } from './index-path';
 import {
@@ -58,6 +59,7 @@ function createIndexId(): string {
 }
 
 export class IndexManager {
+	readonly folderPages: FolderPages;
 	private readonly ownedIndexPaths = new Set<string>();
 	private readonly pendingIndexCreates = new Set<string>();
 	private readonly suppressedFolderCreates = new Set<string>();
@@ -81,6 +83,7 @@ export class IndexManager {
 			update: (settings: IndexPluginSettings) => IndexPluginSettings,
 		) => Promise<void>,
 	) {
+		this.folderPages = new FolderPages(plugin, (paths = []) => { for (const path of paths) this.scheduleFolderSync(getParentPath(path)); this.emitOwnedIndexesChanged(); });
 		this.folderWork = new FolderWorkQueue((path) => this.updateFolder(path));
 	}
 
@@ -88,6 +91,7 @@ export class IndexManager {
 		this.disposed = false;
 		this.plugin.app.workspace.onLayoutReady(() => {
 			if (this.disposed) return;
+			this.folderPages.start();
 			this.refreshOwnedIndexPaths();
 
 			this.plugin.registerEvent(
@@ -102,7 +106,7 @@ export class IndexManager {
 			);
 			this.plugin.registerEvent(
 				this.plugin.app.vault.on('rename', (file, oldPath) => {
-					void this.handleRename(file, oldPath);
+					void this.handleRename(file, oldPath).catch(error => this.reportFolderPageError(error));
 				}),
 			);
 			this.plugin.registerEvent(
@@ -112,6 +116,7 @@ export class IndexManager {
 			);
 			this.plugin.registerEvent(
 				this.plugin.app.metadataCache.on('changed', (file, _data, cache) => {
+					void this.folderPages.refresh(file, cache.frontmatter?.[FOLDER_PAGE_KEY]).catch(error => this.reportFolderPageError(error));
 					const owned =
 						cache.frontmatter?.[INDEX_OWNER_KEY] === INDEX_OWNER_VALUE;
 					const changed = owned
@@ -145,6 +150,7 @@ export class IndexManager {
 
 	dispose(): void {
 		this.disposed = true;
+		this.folderPages.dispose();
 		this.folderWork.dispose();
 		this.ensuringIndexes.clear();
 		this.pendingIndexCreates.clear();
@@ -186,8 +192,41 @@ export class IndexManager {
 		return indexes[0] ?? null;
 	}
 
+	/** Resolve external pages before legacy owned/conventional indexes. */
+	resolveFolderPage(folderPath: string): TFile | null {
+		const folder = this.plugin.app.vault.getFolderByPath(folderPath);
+		return folder ? this.folderPages.get(folderPath) ?? this.getIndex(folder) ?? this.getConventionalIndex(folder) : null;
+	}
+
+	getRepresentedFolder(file: TFile | null): TFolder | null {
+		if (!file) return null;
+		const path = this.folderPages.folderFor(file);
+		return path ? this.plugin.app.vault.getFolderByPath(path) : this.isOwnedIndex(file) ? file.parent : null;
+	}
+
+	async prepareTargetFolder(target: TFile | TFolder): Promise<TFolder | null> {
+		if (target instanceof TFolder) { await this.folderPages.discover(target); return target; }
+		await this.folderPages.refresh(target, true);
+		return this.getRepresentedFolder(target);
+	}
+
+	isFolderPagePath(path: string): boolean {
+		return this.isOwnedIndexPath(path) || this.folderPages.isPagePath(path);
+	}
+
+	async openFolderPath(path: string, newLeaf = false): Promise<void> {
+		const folder = this.plugin.app.vault.getFolderByPath(path);
+		if (!folder) throw new Error(`Could not find “${path}”.`);
+		await this.openIndex(folder, newLeaf);
+	}
+
+	private reportFolderPageError(error: unknown): void {
+		console.error('Could not update folder-page mapping.', error);
+		new Notice(error instanceof Error ? error.message : 'Could not update the folder page.');
+	}
+
 	isPlainFolder(folder: TFolder): boolean {
-		return isPlainFolder(this.getSettings(), folder.path);
+		return !this.folderPages.get(folder.path) && isPlainFolder(this.getSettings(), folder.path);
 	}
 
 	async createPlainFolder(
@@ -195,7 +234,7 @@ export class IndexManager {
 		rawName: string,
 	): Promise<TFolder> {
 		const folderName = normalizeFolderName(rawName);
-		const parent = target instanceof TFolder ? target : target.parent;
+		const parent = target instanceof TFolder ? target : this.getRepresentedFolder(target) ?? target.parent;
 		if (!parent) throw new Error('Could not determine where to create the folder.');
 
 		const folderPath = joinPath(parent.path, folderName);
@@ -219,6 +258,8 @@ export class IndexManager {
 	}
 
 	async ensureIndex(folder: TFolder): Promise<TFile> {
+		const mapped = await this.folderPages.discover(folder);
+		if (mapped) return mapped;
 		const existing = this.getIndex(folder);
 		if (existing) return existing;
 		await this.stopTreatingAsPlain(folder.path);
@@ -235,6 +276,7 @@ export class IndexManager {
 
 	async openIndex(folder: TFolder, newLeaf: boolean | 'tab' | 'split' | 'window'): Promise<void> {
 		const index =
+			(await this.folderPages.discover(folder)) ??
 			this.getIndex(folder) ??
 			this.getConventionalIndex(folder) ??
 			(await this.ensureIndex(folder));
@@ -242,13 +284,14 @@ export class IndexManager {
 	}
 
 	async createChildNote(target: TFile | TFolder, rawName: string): Promise<TFile> {
+		if (target instanceof TFile) await this.folderPages.refresh(target, true);
 		const noteName = normalizeNoteName(rawName);
 		let folder: TFolder | null;
 		if (target instanceof TFolder) {
 			folder = target;
 			await this.convertFolder(folder);
-		} else if (this.isOwnedIndex(target)) {
-			folder = target.parent;
+		} else if (this.getRepresentedFolder(target)) {
+			folder = this.getRepresentedFolder(target);
 		} else {
 			folder = await this.convertNoteToIndex(target);
 		}
@@ -285,6 +328,8 @@ export class IndexManager {
 			throw new Error(`“${folderName}” already exists in this location.`);
 		}
 
+		this.folderPages.checkRename(folder, newPath);
+		const external = this.folderPages.get(folder.path);
 		const index = this.getIndex(folder);
 		const futureIndexPath = joinPath(
 			folder.path,
@@ -292,13 +337,15 @@ export class IndexManager {
 		);
 		const indexNameConflict =
 			this.plugin.app.vault.getAbstractFileByPath(futureIndexPath);
-		if (indexNameConflict && indexNameConflict !== index) {
+		if (!external && indexNameConflict && indexNameConflict !== index) {
 			throw new Error(
 				`“${folderName}.md” already exists inside this folder. Rename it before renaming the folder.`,
 			);
 		}
 
+		const oldPath = folder.path;
 		await this.plugin.app.fileManager.renameFile(folder, newPath);
+		await this.folderPages.folderRenamed(oldPath, newPath);
 		const renamedFolder = this.plugin.app.vault.getFolderByPath(newPath);
 		if (!renamedFolder) {
 			throw new Error('The folder was renamed, but could not be found afterward.');
@@ -311,6 +358,8 @@ export class IndexManager {
 		if (folder.isRoot()) {
 			throw new Error('The vault root cannot be converted yet.');
 		}
+		const mapped = await this.folderPages.discover(folder);
+		if (mapped) return mapped;
 		await this.stopTreatingAsPlain(folder.path);
 
 		const namedIndexPath = this.getExpectedIndexPath(folder);
@@ -408,7 +457,11 @@ export class IndexManager {
 				size: sidecar.stat.size,
 			});
 		}
-		return buildMigrationPlan(root.path, maxDepth, entries);
+		const plan = buildMigrationPlan(root.path, maxDepth, entries);
+		for (const entry of entries) {
+			if (entry.kind === 'folder' && this.folderPages.get(entry.path)) plan.blockers.push({path:entry.path, folderPath:entry.path, reason:'This folder already has an externally managed page. Keep its existing topic structure.'});
+		}
+		return plan;
 	}
 
 	async applyMigrationPlan(
@@ -651,6 +704,8 @@ export class IndexManager {
 	}
 
 	private async createIndex(folder: TFolder): Promise<TFile> {
+		const mapped = await this.folderPages.discover(folder);
+		if (mapped) return mapped;
 		const indexId = createIndexId();
 		const indexPath = this.getExpectedIndexPath(folder);
 		if (this.plugin.app.vault.getAbstractFileByPath(indexPath)) {
@@ -758,6 +813,7 @@ export class IndexManager {
 	}
 
 	private async performRefreshOwnershipMetadata(folder: TFolder): Promise<void> {
+		if (this.folderPages.get(folder.path)) return;
 		const currentIndex = this.getIndex(folder);
 		if (!currentIndex) return;
 		const frontmatter =
@@ -897,11 +953,12 @@ export class IndexManager {
 	}
 
 	private async syncFolder(folder: TFolder): Promise<void> {
+		if (this.folderPages.get(folder.path)) return;
 		const index = this.getIndex(folder);
 		if (!index || this.disposed || isTemporaryFolderIndex(index.name, folder.name)) return;
 		const indexPath = index.path;
 		const children = [...folder.children]
-			.filter((child) => !this.isOwnedIndex(child))
+			.filter((child) => !this.isOwnedIndex(child) && !(child instanceof TFile && this.folderPages.isPagePath(child.path)))
 			.sort((left, right) => {
 				if (left instanceof TFolder && right instanceof TFile) return -1;
 				if (left instanceof TFile && right instanceof TFolder) return 1;
@@ -915,7 +972,7 @@ export class IndexManager {
 		for (const child of children) {
 			if (child instanceof TFolder) {
 				let childIndex =
-					this.getIndex(child) ?? this.getConventionalIndex(child);
+					this.resolveFolderPage(child.path);
 				if (!childIndex) {
 					if (!this.shouldIndexFolder(child.path)) continue;
 					childIndex = await this.ensureIndex(child);
@@ -1023,6 +1080,7 @@ export class IndexManager {
 		if (!folder || !shouldAutoIndexFolder(this.getSettings(), folder.path)) return;
 
 		try {
+			if (await this.folderPages.discover(folder)) return;
 			const conventionalIndex = this.getConventionalIndex(folder);
 			if (conventionalIndex && !this.isOwnedIndex(conventionalIndex)) {
 				if (shouldAutoAdoptFolder(this.getSettings(), folder.path)) {
@@ -1045,6 +1103,7 @@ export class IndexManager {
 		this.scheduleFolderSync(file.parent?.path ?? '');
 
 		if (file instanceof TFile) {
+			this.emitOwnedIndexesChanged();
 			const owned =
 				this.ownedIndexPaths.delete(oldPath) || this.cacheSaysOwned(file);
 			if (owned) {
@@ -1057,6 +1116,7 @@ export class IndexManager {
 			return;
 		}
 
+		await this.folderPages.folderRenamed(oldPath, file.path);
 		const oldPrefix = `${oldPath}/`;
 		await this.updatePlainFolders((paths) =>
 			paths.map((path) =>
@@ -1088,6 +1148,7 @@ export class IndexManager {
 	}
 
 	private handleDelete(file: TAbstractFile): void {
+		if (file instanceof TFile || file instanceof TFolder) this.folderPages.deleted(file);
 		if (file instanceof TFolder) {
 			const prefix = `${file.path}/`;
 			void this.updatePlainFolders((paths) =>

@@ -30,6 +30,7 @@ class FakeFile {
 	path: string;
 	parent: FakeFolder;
 	extension = 'md';
+	stat = {size:100,ctime:1,mtime:1};
 	constructor(name: string, parent: FakeFolder) {
 		this.path = `${parent.path}/${name}`;
 		this.parent = parent;
@@ -75,11 +76,17 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 	const renames: string[] = [];
 	const notices: { message: string; hidden: boolean }[] = [];
 	const errors: unknown[][] = [];
+	const opened: string[] = [];
 	let processHook: (() => Promise<void>) | undefined;
 	let frontmatterWrites = 0;
 	const files = () => folders.flatMap((entry) => entry.children.filter((f): f is FakeFile => f instanceof FakeFile));
-	const rename = (file: FakeFile, newPath: string) => {
+	const rename = (file: FakeFile | FakeFolder, newPath: string) => {
 		const oldPath = file.path;
+		if (file instanceof FakeFolder) {
+			for (const child of [...folders, ...files()]) if (child !== file && child.path.startsWith(oldPath + '/')) child.path = newPath + child.path.slice(oldPath.length);
+			file.name = newPath.split('/').at(-1)!;
+		}
+		for (const [path, document] of [...documents]) if (path === oldPath || path.startsWith(oldPath + '/')) { documents.delete(path); documents.set(newPath + path.slice(oldPath.length), document); }
 		file.path = newPath;
 		events.emit('rename', file, oldPath);
 	};
@@ -87,13 +94,18 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 		register: (callback: () => void) => { cleanups.push(callback); },
 		registerEvent: (cleanup: () => void) => { cleanups.push(cleanup); },
 		app: {
-			workspace: { onLayoutReady: (callback: () => void) => { callback(); } },
+			workspace: { onLayoutReady: (callback: () => void) => { callback(); }, getLeaf: () => ({openFile: async (file: FakeFile) => { opened.push(file.path); }}) },
 			metadataCache: {
 				on: metadata.on.bind(metadata),
 				getFileCache: (file: FakeFile) => caches.get(file),
 			},
 			vault: {
 				on: events.on.bind(events),
+				read: async (file: FakeFile) => documents.get(file.path) ?? ('---\n' + Object.entries(caches.get(file)?.frontmatter ?? {}).map(([k,v])=>k+': '+JSON.stringify(v)).join('\n') + '\n---\n'),
+				create: async (path: string, text: string) => {
+					const parent = folders.find(f=>f.path===path.split('/').slice(0,-1).join('/'))!;
+					const file = new FakeFile(path.split('/').at(-1)!, parent);documents.set(path,text);caches.set(file,{frontmatter:{}});events.emit('create',file);return file;
+				},
 				getMarkdownFiles: files,
 				getAllFolders: () => folders.filter((entry) => !entry.isRoot()),
 				getFolderByPath: (path: string) => folders.find((entry) => entry.path === path),
@@ -111,8 +123,11 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 				processFrontMatter: (file: FakeFile, update: (data: Record<string, unknown>) => void) => {
 					frontmatterWrites++;
 					update(caches.get(file)!.frontmatter);
+					const body = (documents.get(file.path) ?? '').replace(/^---\n[\s\S]*?\n---\n?/, '');
+					documents.set(file.path, '---\n' + Object.entries(caches.get(file)!.frontmatter).map(([k,v])=>k+': '+JSON.stringify(v)).join('\n') + '\n---\n' + body);
+					metadata.emit('changed', file, '', caches.get(file));
 				},
-				renameFile: (file: FakeFile, newPath: string) => {
+				renameFile: (file: FakeFile | FakeFolder, newPath: string) => {
 					renames.push(newPath);
 					rename(file, newPath);
 				},
@@ -124,6 +139,8 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 	runInNewContext(bundle, {
 		module, exports: module.exports,
 		require: () => ({
+			getFrontMatterInfo: (text: string) => { const m=text.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);return {exists:!!m,frontmatter:m?.[1]??''}; },
+			parseYaml: (text: string) => Object.fromEntries(text.split('\n').filter(Boolean).map(line=>{const i=line.indexOf(':');return [line.slice(0,i),JSON.parse(line.slice(i+1))];})),
 			TFile: FakeFile, TFolder: FakeFolder, normalizePath: (path: string) => path,
 			Notice: class {
 				message: string;
@@ -158,7 +175,7 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 	);
 	manager.start();
 	return {
-		manager, index, folder, writes, renames, notices, errors, documents,
+		manager, index, folder, writes, renames, notices, errors, documents, opened,
 		setManagedDepth(maxDepth: number) {
 			settings = { ...settings, autoIndexNewFolders: true,
 				managedRoots: [{ path: folder.path, maxDepth, autoAdopt: true }] };
@@ -174,6 +191,17 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 			if (emitCreate) events.emit('create', note);
 			return note;
 		},
+		addPage(child: FakeFolder, cacheReady = true) {
+			const page = new FakeFile(child.name + '.md', child.parent!);
+			const props = {topic_folder:child.path, learning_type:'topic', added:'2026-11-01'};
+			documents.set(page.path, '---\n' + Object.entries(props).map(([k,v])=>k+': '+JSON.stringify(v)).join('\n') + '\n---\nMy original topic content.\n![[Shared topic.base]]\n');
+			caches.set(page, {frontmatter:cacheReady?props:{}});
+			if(cacheReady) metadata.emit('changed',page,'',caches.get(page));
+			return page;
+		},
+		setPageCache(page: FakeFile, props: Record<string, unknown>) {caches.set(page,{frontmatter:props});metadata.emit('changed',page,'',caches.get(page));},
+		deleteFile(file: FakeFile) { file.parent.children=file.parent.children.filter(f=>f!==file);events.emit('delete',file); },
+		move: rename,
 		markOwned(note: FakeFile) {
 			caches.set(note, { frontmatter: {
 				'index-plugin': 'folder-index',
@@ -393,4 +421,86 @@ void test('does not save settings when a rename leaves plain folders unchanged',
 	await h.advance(0);
 	assert.equal(h.settingsSaves, 0);
 	h.unload();
+});
+
+
+void test('reuses a canonical topic page for open, convert and concurrent ensure before metadata catches up', async () => {
+	const h = harness();
+	const folder = h.addFolder('embedding');
+	const page = h.addPage(folder, false);
+	const original = h.documents.get(page.path);
+	const ensures = await Promise.all([h.manager.ensureIndex(folder as never), h.manager.convertFolder(folder as never), h.manager.ensureIndex(folder as never)]);
+	for (const file of ensures) assert.equal(file, page);
+	await h.manager.openIndex(folder as never, false);
+	assert.equal(h.opened.at(-1), page.path);
+	assert.equal(h.manager.getRepresentedFolder(page as never), folder);
+	assert.equal(h.manager.isFolderPagePath(page.path), true);
+	await h.advance(2000);
+	assert.equal(h.documents.get(page.path), original);
+	assert.ok(!folder.children.some(f => f.name === 'embedding.md'));
+	assert.equal((h.documents.get(h.index.path)!.match(/Projects\/embedding.md/g) ?? []).length, 1);
+	assert.deepEqual(h.errors, []);
+	h.unload();
+});
+
+void test('registered topic wins over an old owned duplicate without writing either page', async () => {
+	const h = harness();const folder = h.addFolder('embedding');const page = h.addPage(folder);
+	const duplicate = h.addFolderNote(folder);h.markOwned(duplicate);
+	await h.advance(2000);
+	assert.equal(await h.manager.convertFolder(folder as never),page);
+	assert.equal(h.manager.resolveFolderPage(folder.path),page);
+	assert.ok(!h.writes.includes(page.path));assert.ok(!h.writes.includes(duplicate.path));
+	h.unload();
+});
+
+void test('API registration reads persisted metadata, is idempotent and rejects mismatches', async () => {
+	const h=harness();const folder=h.addFolder('embedding');const page=h.addPage(folder,false);
+	await h.manager.folderPages.register(page as never,folder.path);
+	await h.manager.folderPages.register(page as never,folder.path);
+	assert.equal(h.manager.resolveFolderPage(folder.path),page);
+	await assert.rejects(h.manager.folderPages.register(page as never,'Projects'),/must match/);
+	assert.equal(h.frontmatterWrites,0);
+	h.unload();await assert.rejects(h.manager.folderPages.register(page as never,folder.path),/unloaded/);
+});
+
+void test('ambiguous mappings fail closed and stay visible; deletion restores unique ownership', async () => {
+	const h=harness();const folder=h.addFolder('embedding');const page=h.addPage(folder);await h.advance(0);
+	const other=h.addPage(folder);other.path='Projects/other.md';await h.advance(0);
+	assert.throws(()=>h.manager.resolveFolderPage(folder.path),/More than one/);
+	assert.equal(h.manager.isFolderPagePath(page.path),false);
+	await assert.rejects(h.manager.ensureIndex(folder as never),/More than one/);
+	h.deleteFile(other);assert.equal(h.manager.resolveFolderPage(folder.path),page);
+	h.unload();
+});
+
+void test('creating a child from a topic page files it inside the topic without converting the sidecar', async () => {
+	const h=harness();const folder=h.addFolder('embedding');const page=h.addPage(folder);await h.advance(0);
+	const child=await h.manager.createChildNote(page as never,'article');
+	assert.equal(child.path,'Projects/embedding/article.md');assert.equal(page.path,'Projects/embedding.md');
+	assert.ok(!folder.children.some(f=>f.name==='embedding.md'));h.unload();
+});
+
+void test('renaming a topic folder updates its sidecar and nested mappings while preserving content and dates', async () => {
+	const h=harness();const folder=h.addFolder('embedding');const page=h.addPage(folder);await h.advance(0);
+	// Reuse the helper to create a nested folder under the topic.
+	const nested=h.addFolder('embedding/data');folder.children.push(nested);nested.parent=folder;
+	const nestedPage=h.addPage(nested);await h.advance(0);
+	await h.manager.renameFolder(folder as never,'vectors');await h.advance(1000);
+	assert.equal(page.path,'Projects/vectors.md');assert.equal(h.manager.resolveFolderPage('Projects/vectors'),page);
+	assert.equal(h.manager.resolveFolderPage('Projects/vectors/data'),nestedPage);
+	assert.match(h.documents.get(page.path)!,/My original topic content/);assert.match(h.documents.get(page.path)!,/2026-11-01/);
+	assert.match(h.documents.get(nestedPage.path)!,/Projects\/vectors\/data/);
+	assert.ok(!h.writes.includes(page.path));assert.deepEqual(h.errors,[]);h.unload();
+});
+
+void test('rename conflicts are rejected before changing the topic folder', async () => {
+	const h=harness();const folder=h.addFolder('embedding');h.addPage(folder);const other=h.addFolder('vectors');h.addPage(other);await h.advance(0);
+	await assert.rejects(h.manager.renameFolder(folder as never,'vectors'),/already exists/);
+	assert.equal(folder.path,'Projects/embedding');h.unload();
+});
+
+void test('tree migration cannot move or retire an externally managed topic page', async () => {
+	const h=harness();const folder=h.addFolder('embedding');h.addPage(folder);await h.advance(0);
+	const plan=h.manager.createMigrationPlan(folder as never,2);
+	assert.ok(plan.blockers.some(b=>b.reason.includes('externally managed')));h.unload();
 });

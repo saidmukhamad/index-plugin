@@ -1,7 +1,7 @@
 {
 	"id": "index-plugin",
 	"name": "Index Plugin",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"minAppVersion": "1.6.6",
 	"description": "Turns folders into indexed notes with automatically linked children.",
 	"author": "Said Mukhamad",
