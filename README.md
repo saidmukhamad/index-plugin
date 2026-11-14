@@ -8,7 +8,7 @@ Index Plugin gives an indexed folder its own Markdown document, opens that docum
 
 ## Features
 
-- **Reuse existing topic pages.** A page with `topic_folder` represents its directory without creating another in-folder index. External forms can handle child creation through the [versioned API](docs/api.md).
+- **Reuse existing topic pages.** A Markdown page with `topic_folder`, or a Base with a constant `formulas.folder_page`, represents its directory without creating another in-folder index. External forms can handle child creation through the [versioned API](docs/api.md).
 - **Folders open like notes.** Click a folder name to open its document; use the chevron to expand or collapse it.
 - **Compact pages section.** Direct child notes and subfolders appear in a naturally sorted list inside a collapsed, lowercase `pages` section. Neutral colors, no icon, and tight spacing keep it consistent with compact activity views. The list stays synchronized as files change.
 - **One name everywhere.** `Projects/Projects.md` represents the `Projects` folder. Rename the folder or its visible note title and the other follows.

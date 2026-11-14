@@ -18,13 +18,23 @@ export class FolderPages {
 	private readonly writing = new Set<TFile>();
 	private readonly renaming = new Map<string, Promise<void>>();
 	private disposed = false;
+	private initialScan: Promise<void> = Promise.resolve();
 
 	constructor(private readonly plugin: Plugin, private readonly changed: (paths?: string[]) => void) {}
 
-	start(): void {
+	start(): Promise<void> {
+		this.initialScan = this.scan();
+		return this.initialScan;
+	}
+
+	private async scan(): Promise<void> {
 		for (const file of this.plugin.app.vault.getMarkdownFiles()) {
 			const value: unknown = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter?.[FOLDER_PAGE_KEY];
 			if (validFolderPath(value)) this.set(file, value);
+		}
+		for (const file of this.plugin.app.vault.getFiles().filter(file => file.extension === 'base')) {
+			if (this.disposed) return;
+			await this.refresh(file, true);
 		}
 		this.changed();
 	}
@@ -72,8 +82,13 @@ export class FolderPages {
 	private async readFolder(file: TFile): Promise<string | null> {
 		const text = await this.plugin.app.vault.read(file);
 		const info = getFrontMatterInfo(text);
-		const props: unknown = info.exists ? parseYaml(info.frontmatter) : null;
-		const value: unknown = props && typeof props === 'object' ? (props as Record<string, unknown>)[FOLDER_PAGE_KEY] : null;
+		const props: unknown = file.extension === 'base' ? parseYaml(text) : info.exists ? parseYaml(info.frontmatter) : null;
+		let value: unknown = props && typeof props === 'object' ? (props as Record<string, unknown>)[FOLDER_PAGE_KEY] : null;
+		if (file.extension === 'base' && props && typeof props === 'object') {
+			const formulas = (props as Record<string, unknown>).formulas;
+			const expression = formulas && typeof formulas === 'object' ? (formulas as Record<string, unknown>).folder_page : null;
+			value = typeof expression === 'string' ? JSON.parse(expression) as unknown : null;
+		}
 		if (value == null) return null;
 		if (!validFolderPath(value)) throw new Error(`Invalid topic_folder in “${file.path}”.`);
 		return value;
@@ -81,7 +96,7 @@ export class FolderPages {
 
 	async register(file: TFile, folderPath: string): Promise<void> {
 		if (this.disposed) throw new Error('Index Plugin is unloaded.');
-		if (file.extension !== 'md' || this.plugin.app.vault.getFileByPath(file.path) !== file) throw new Error('Register an existing Markdown page.');
+		if (!['md', 'base'].includes(file.extension) || this.plugin.app.vault.getFileByPath(file.path) !== file) throw new Error('Register an existing Markdown or Base page.');
 		if (!validFolderPath(folderPath) || !this.plugin.app.vault.getFolderByPath(folderPath)) throw new Error('Register an existing vault folder.');
 		if (await this.readFolder(file) !== folderPath) throw new Error('The page’s topic_folder must match the registered folder.');
 		const previous = this.get(folderPath);
@@ -102,6 +117,7 @@ export class FolderPages {
 
 	/** Fresh sibling lookup closes the create/cache/startup race before writing an index. */
 	async discover(folder: TFolder): Promise<TFile | null> {
+		await this.initialScan;
 		const registered = this.get(folder.path);
 		if (registered) return registered;
 		const sibling = this.plugin.app.vault.getFileByPath(`${folder.path}.md`);
@@ -130,6 +146,15 @@ export class FolderPages {
 				for (const {file, folderPath} of affected) {
 					if (this.disposed) return;
 					const target = newPath + folderPath.slice(oldPath.length);
+					if (file.extension === 'base') {
+						await this.plugin.app.vault.process(file, text => {
+							const props = parseYaml(text) as Record<string, unknown>;
+							const formulas = props.formulas as Record<string, unknown>;
+							const value: unknown = typeof formulas.folder_page === 'string' ? JSON.parse(formulas.folder_page) as unknown : null;
+							if (value !== folderPath && value !== target) throw new Error(`“${file.path}” changed during the folder rename.`);
+							return text.replace(/^([ \t]+)folder_page:[^\n]*/m, (_line: string, indent: string) => `${indent}folder_page: ${JSON.stringify(JSON.stringify(target))}`);
+						});
+					} else {
 					await this.plugin.app.fileManager.processFrontMatter(file, raw => {
 						const props = raw as Record<string, unknown>;
 						if (props[FOLDER_PAGE_KEY] !== folderPath && props[FOLDER_PAGE_KEY] !== target) throw new Error(`“${file.path}” changed during the folder rename.`);
@@ -137,6 +162,7 @@ export class FolderPages {
 						const root: unknown = props.learning_root;
 						if (typeof root === 'string' && (root === oldPath || root.startsWith(`${oldPath}/`))) props.learning_root = newPath + root.slice(oldPath.length);
 					});
+					}
 					// Only the direct sidecar follows its folder's name. Descendants move natively.
 					if (folderPath === oldPath && file.path.toLowerCase() === `${oldPath}.md`.toLowerCase()) {
 						const conflict = this.plugin.app.vault.getAbstractFileByPath(`${newPath}.md`);

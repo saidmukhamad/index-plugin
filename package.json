@@ -1,6 +1,6 @@
 {
 	"name": "index-plugin",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "An Obsidian plugin for working with indexes.",
 	"main": "main.js",
 	"type": "module",

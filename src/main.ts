@@ -48,8 +48,8 @@ export default class IndexPlugin extends Plugin {
 
 		this.addRibbonIcon('file-plus-2', 'Create new (indexed)', () => {
 			const file = this.app.workspace.getActiveFile();
-			if (!file || file.extension !== 'md') {
-				new Notice('Open a Markdown note before creating an indexed child.');
+			if (!this.canCreateFor(file)) {
+				new Notice('Open a note or a represented Base before creating a child.');
 				return;
 			}
 			void this.promptAndCreate(file);
@@ -68,7 +68,7 @@ export default class IndexPlugin extends Plugin {
 			name: 'Create new (indexed)',
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
-				const available = file instanceof TFile && file.extension === 'md';
+				const available = this.canCreateFor(file);
 				if (available && !checking) void this.promptAndCreate(file);
 				return available;
 			},
@@ -106,12 +106,19 @@ export default class IndexPlugin extends Plugin {
 						add('Create new (indexed)', 'file-plus-2', () => void this.promptAndCreate(file));
 					}
 					add('Create folder', 'folder-plus', () => void this.promptAndCreateFolder(file));
-				} else if (file instanceof TFile && file.extension === 'md') {
+				} else if (file instanceof TFile && this.canCreateFor(file)) {
 					add('Create new (indexed)', 'file-plus-2', () => void this.promptAndCreate(file));
 					add('Create folder', 'folder-plus', () => void this.promptAndCreateFolder(file));
 				}
 			}),
 		);
+	}
+
+	private canCreateFor(file: TFile | null): file is TFile {
+		if (!file) return false;
+		if (file.extension === 'md') return true;
+		try { return file.extension === 'base' && !!this.indexManager.getRepresentedFolder(file); }
+		catch { return false; }
 	}
 
 	private openMigration(folder: TFolder): void {

@@ -91,7 +91,7 @@ export class IndexManager {
 		this.disposed = false;
 		this.plugin.app.workspace.onLayoutReady(() => {
 			if (this.disposed) return;
-			this.folderPages.start();
+			void this.folderPages.start().catch(error => this.reportFolderPageError(error));
 			this.refreshOwnedIndexPaths();
 
 			this.plugin.registerEvent(
@@ -1008,6 +1008,7 @@ export class IndexManager {
 	}
 
 	private async handleCreate(file: TAbstractFile): Promise<void> {
+		if (file instanceof TFile && file.extension === 'base') await this.folderPages.refresh(file, true);
 		if (file instanceof TFolder) {
 			if (this.suppressedFolderCreates.has(file.path)) return;
 			this.scheduleFolderSync(file.parent?.path ?? '');
@@ -1028,6 +1029,7 @@ export class IndexManager {
 	}
 
 	private handleModify(file: TFile): void {
+		if (file.extension === 'base') void this.folderPages.refresh(file, true).catch(error => this.reportFolderPageError(error));
 		this.scheduleConventionalIndexAdoption(file);
 	}
 

@@ -106,7 +106,8 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 					const parent = folders.find(f=>f.path===path.split('/').slice(0,-1).join('/'))!;
 					const file = new FakeFile(path.split('/').at(-1)!, parent);documents.set(path,text);caches.set(file,{frontmatter:{}});events.emit('create',file);return file;
 				},
-				getMarkdownFiles: files,
+				getMarkdownFiles: () => files().filter(file => file.extension === 'md'),
+				getFiles: files,
 				getAllFolders: () => folders.filter((entry) => !entry.isRoot()),
 				getFolderByPath: (path: string) => folders.find((entry) => entry.path === path),
 				getFileByPath: (path: string) => files().find((file) => file.path === path),
@@ -190,6 +191,11 @@ function harness(filename = 'Projects.md', plainFolders: string[] = []) {
 			const note = new FakeFile(`${child.name}.md`, child);
 			if (emitCreate) events.emit('create', note);
 			return note;
+		},
+		addBase(child: FakeFolder) {
+			const page=new FakeFile(child.name+'.base',child.parent!);page.extension='base';
+			documents.set(page.path,'formulas: '+JSON.stringify({folder_page:JSON.stringify(child.path)}));
+			return page;
 		},
 		addPage(child: FakeFolder, cacheReady = true) {
 			const page = new FakeFile(child.name + '.md', child.parent!);
@@ -503,4 +509,24 @@ void test('tree migration cannot move or retire an externally managed topic page
 	const h=harness();const folder=h.addFolder('embedding');h.addPage(folder);await h.advance(0);
 	const plan=h.manager.createMigrationPlan(folder as never,2);
 	assert.ok(plan.blockers.some(b=>b.reason.includes('externally managed')));h.unload();
+});
+
+void test('a Base can represent a plain collection folder without creating a Markdown index', async () => {
+	const h=harness('Projects.md',['Projects/dl']);const folder=h.addFolder('dl');const page=h.addBase(folder);
+	await h.manager.folderPages.register(page as never,folder.path);
+	assert.equal(h.manager.isPlainFolder(folder as never),false);
+	await h.manager.openIndex(folder as never,false);assert.equal(h.opened.at(-1),page.path);
+	assert.equal(await h.manager.convertFolder(folder as never),page);
+	assert.equal(await h.manager.ensureIndex(folder as never),page);
+	assert.equal(h.manager.isFolderPagePath(page.path),true);
+	assert.ok(!folder.children.some(f=>f.name==='dl.md'));await h.advance(1000);
+	assert.equal(h.documents.get(page.path),'formulas: '+JSON.stringify({folder_page:JSON.stringify('Projects/dl')}));assert.deepEqual(h.errors,[]);h.unload();
+});
+
+void test('Base folder mappings recover on startup before concurrent open/ensure actions', async () => {
+	const h=harness();const folder=h.addFolder('dl');const page=h.addBase(folder);
+	const starting=h.manager.folderPages.start();
+	await Promise.all([starting,h.manager.openIndex(folder as never,false),h.manager.ensureIndex(folder as never)]);
+	assert.equal(h.manager.resolveFolderPage(folder.path),page);assert.ok(!folder.children.some(f=>f.name==='dl.md'));
+	assert.deepEqual(h.errors,[]);h.unload();
 });

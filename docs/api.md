@@ -23,7 +23,7 @@ interface IndexPluginApi {
 
 ## External pages
 
-A page represents an existing vault directory through its `topic_folder` property. Paths are vault-relative, with no leading or trailing slash. The page can live beside that directory:
+A Markdown page represents an existing vault directory through its `topic_folder` property. A `.base` page can represent a collection folder through a constant `formulas.folder_page` expression (for example `folder_page: '"learning/dl"'`). Keeping this declaration in the supported formulas section preserves it when Bases saves view settings. Paths are vault-relative, with no leading or trailing slash. The page can live beside that directory:
 
 ```text
 learning/dl/embedding.md        topic_folder: learning/dl/embedding
@@ -64,3 +64,10 @@ Folder renames update `topic_folder` throughout the mapped subtree. A matching s
 The normal tree migration blocks scopes containing external folder pages, so its sidecar-folding rules cannot move or retire them. Existing redundant owned indexes require a separate, backed-up, one-time migration. Registering a canonical page deliberately does not delete or merge another file.
 
 Implementation: `src/api.ts` owns the public contract and child dispatch; `src/folder-pages.ts` owns external mappings. `src/index-manager.ts` consults that resolver before normal owned-index operations. Explorer integration never treats an external page as an internally owned index.
+
+
+## Collection folders represented by Bases
+
+`folderPages.register(baseFile, "learning/dl")` validates `formulas.folder_page` from the Base YAML. The literal formula must evaluate to the registered folder path. Startup scans discover these declarations without relying on Templater. Folder clicks open the existing Base, overriding a plain-folder preference only while an explicit, unique representative is present. The separate Base file row is hidden in Explorer, and creating a child from the represented Base uses the registered capture form. No Markdown index is created.
+
+A Base remains responsible for its query filters; changing a folder mapping does not rewrite arbitrary filter expressions. The declaration itself follows native folder renames.
